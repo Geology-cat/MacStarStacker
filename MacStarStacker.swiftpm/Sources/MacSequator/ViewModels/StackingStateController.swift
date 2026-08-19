@@ -55,8 +55,16 @@ class StackingStateController {
     var timelapseProgress: Double = 0.0 { didSet { notifyStateChanged() } }
     var timelapseStatus: String = "" { didSet { notifyStateChanged() } }
 
+    // ── 光跡除去設定 (スタートレイル) ──
+    var enableTrailRemoval: Bool = false { didSet { notifyStateChanged() } }
+    var detectedTrails: [DetectedTrailItem] = [] { didSet { notifyStateChanged() } }
+    var isAnalyzingTrails: Bool = false { didSet { notifyStateChanged() } }
+    var trailAnalysisProgress: Double = 0.0 { didSet { notifyStateChanged() } }
+    var trailAnalysisStatus: String = "" { didSet { notifyStateChanged() } }
+
     // ── コールバック ──
     var onStateChanged: (() -> Void)? = nil
+    var onRequestShowTrailReview: (([DetectedTrailItem]) -> Void)? = nil
 
     // ── Undo 履歴 ──
     private struct Snapshot {
@@ -212,7 +220,73 @@ class StackingStateController {
 
     // MARK: - スタッキングパイプライン
 
-    func startStacking() {
+    // MARK: - 光跡解析パイプライン (スタートレイル用)
+
+    func analyzeTrails(completion: (([DetectedTrailItem]) -> Void)? = nil) {
+        let lightFiles = images[.light] ?? []
+        guard lightFiles.count >= 2 else {
+            stackingStatus = "⚠️ 光跡解析には2枚以上のLight画像が必要です"
+            notifyStateChanged()
+            return
+        }
+
+        isAnalyzingTrails = true
+        trailAnalysisProgress = 0.0
+        trailAnalysisStatus = "フレームを解析中..."
+        notifyStateChanged()
+
+        let urls = lightFiles.map { $0.url }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let results = TrailCleaner.detectTrails(inImageURLs: urls) { progress, status in
+                DispatchQueue.main.async {
+                    self.trailAnalysisProgress = progress
+                    self.trailAnalysisStatus = status
+                    self.notifyStateChanged()
+                }
+            }
+
+            var items: [DetectedTrailItem] = []
+            for res in results {
+                let file = (res.frameIndex < lightFiles.count) ? lightFiles[res.frameIndex] : ImageFile(url: URL(fileURLWithPath: res.filePath))
+                let item = DetectedTrailItem(
+                    frameIndex: res.frameIndex,
+                    file: file,
+                    maskImage: res.maskImage,
+                    highlightedImage: res.highlightedImage,
+                    repairedImage: res.repairedImage,
+                    detectedType: res.detectedType,
+                    confidenceScore: res.confidenceScore,
+                    isLikelyMeteor: res.isLikelyMeteor,
+                    isMarkedForRemoval: res.isMarkedForRemoval
+                )
+                items.append(item)
+            }
+
+            DispatchQueue.main.async {
+                self.isAnalyzingTrails = false
+                self.trailAnalysisProgress = 1.0
+                self.detectedTrails = items
+                if items.isEmpty {
+                    self.trailAnalysisStatus = "人工光跡は検出されませんでした（クリーンです）"
+                } else {
+                    let removalCount = items.filter { $0.isMarkedForRemoval }.count
+                    self.trailAnalysisStatus = "検出: \(items.count)件 (除去対象: \(removalCount)件)"
+                }
+                self.notifyStateChanged()
+
+                // レビュー画面を開くコールバック
+                self.onRequestShowTrailReview?(items)
+                completion?(items)
+            }
+        }
+    }
+
+    // MARK: - スタッキングパイプライン
+
+    func startStacking(forceDirectExecution: Bool = false) {
         guard let base = baseImage else {
             stackingStatus = "⚠️ 基準画像を選択してください（★ボタン）"
             notifyStateChanged()
@@ -223,6 +297,20 @@ class StackingStateController {
             stackingStatus = "⚠️ Light画像を追加してください"
             notifyStateChanged()
             return
+        }
+
+        // 比較明合成かつ光跡除去が有効で、直接実行フラグがない場合はまずレビュー
+        if stackMode == "Compare Bright" && enableTrailRemoval && !forceDirectExecution {
+            if detectedTrails.isEmpty {
+                analyzeTrails { _ in
+                    // レビューシートが表示されるので待機
+                }
+                return
+            } else {
+                // 既存の検出結果でレビューを表示
+                onRequestShowTrailReview?(detectedTrails)
+                return
+            }
         }
 
         isStacking = true
@@ -239,6 +327,8 @@ class StackingStateController {
         let compMode   = compositingMode
         let doAlign    = enableAlignment
         let mask       = maskBitmap
+        let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
+        let trailItems = self.detectedTrails
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -261,7 +351,20 @@ class StackingStateController {
 
             var alignedImages: [NSImage] = []
             for (i, lf) in lightFiles.enumerated() {
-                guard let rawImg = NSImage(contentsOf: lf.url) else {
+                var rawImg: NSImage? = nil
+
+                // 光跡除去が有効な場合、該当フレームの光跡をインペイント修復
+                if trailRemovalActive, let trail = trailItems.first(where: { $0.frameIndex == i && $0.isMarkedForRemoval }), let mask = trail.maskImage {
+                    let prevUrl = (i > 0) ? lightFiles[i - 1].url : nil
+                    let nextUrl = (i < total - 1) ? lightFiles[i + 1].url : nil
+                    rawImg = TrailCleaner.inpaintImage(at: lf.url, withMask: mask, prevFrameURL: prevUrl, nextFrameURL: nextUrl)
+                }
+
+                if rawImg == nil {
+                    rawImg = NSImage(contentsOf: lf.url)
+                }
+
+                guard let finalFrameImg = rawImg else {
                     DispatchQueue.main.async {
                         self.stackingProgress = Double(i + 1) / Double(total) * 0.75
                         self.notifyStateChanged()
@@ -270,9 +373,9 @@ class StackingStateController {
                 }
 
                 let cal = CalibrationProcessor.calibrate(
-                    light: rawImg, masterBias: masterBias,
+                    light: finalFrameImg, masterBias: masterBias,
                     masterDark: masterDark, masterFlat: masterFlat
-                ) ?? rawImg
+                ) ?? finalFrameImg
 
                 let tempUrl = FileManager.default.temporaryDirectory
                     .appendingPathComponent("cal_\(UUID().uuidString).tiff")

@@ -58,6 +58,9 @@ public class SettingsViewController: NSViewController {
     // ── スタック設定コントロール ──
     private let stackModePopup = NSPopUpButton()
     private let alignCheckbox = NSButton(checkboxWithTitle: "アライメント (星の位置合わせ)", target: nil, action: nil)
+    private let trailRemovalCheckbox = NSButton(checkboxWithTitle: "✈️ 飛行機・人工衛星の光跡を除去", target: nil, action: nil)
+    private let analyzeTrailsButton = NSButton()
+    private let trailStatusBadge = NSTextField(labelWithString: "")
     private let compositeModeSegmented = NSSegmentedControl()
     private let brushModeSegmented = NSSegmentedControl()
     private let brushSizeSlider = NSSlider(value: 20, minValue: 5, maxValue: 150, target: nil, action: nil)
@@ -105,6 +108,10 @@ public class SettingsViewController: NSViewController {
 
         StackingStateController.shared.onStateChanged = { [weak self] in
             self?.updateUI()
+        }
+
+        StackingStateController.shared.onRequestShowTrailReview = { [weak self] items in
+            self?.presentTrailReview(items: items)
         }
 
         updateUI()
@@ -188,8 +195,29 @@ public class SettingsViewController: NSViewController {
         alignCheckbox.target = self
         alignCheckbox.action = #selector(onAlignToggled)
 
+        trailRemovalCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        trailRemovalCheckbox.title = "✈️ 飛行機・人工衛星の光跡を除去"
+        trailRemovalCheckbox.font = NSFont.systemFont(ofSize: 11)
+        trailRemovalCheckbox.target = self
+        trailRemovalCheckbox.action = #selector(onTrailRemovalToggled)
+
+        analyzeTrailsButton.translatesAutoresizingMaskIntoConstraints = false
+        analyzeTrailsButton.title = "🔍 光跡を解析して確認…"
+        analyzeTrailsButton.bezelStyle = .roundRect
+        analyzeTrailsButton.font = NSFont.systemFont(ofSize: 11)
+        analyzeTrailsButton.target = self
+        analyzeTrailsButton.action = #selector(onAnalyzeTrailsClicked)
+
+        trailStatusBadge.translatesAutoresizingMaskIntoConstraints = false
+        trailStatusBadge.font = NSFont.systemFont(ofSize: 10)
+        trailStatusBadge.textColor = NSColor(red: 1.0, green: 0.55, blue: 0.15, alpha: 1.0)
+        trailStatusBadge.lineBreakMode = .byTruncatingTail
+
         methodCard.container.addSubview(stackModePopup)
         methodCard.container.addSubview(alignCheckbox)
+        methodCard.container.addSubview(trailRemovalCheckbox)
+        methodCard.container.addSubview(analyzeTrailsButton)
+        methodCard.container.addSubview(trailStatusBadge)
 
         NSLayoutConstraint.activate([
             stackModePopup.topAnchor.constraint(equalTo: methodCard.container.topAnchor),
@@ -199,7 +227,19 @@ public class SettingsViewController: NSViewController {
             alignCheckbox.topAnchor.constraint(equalTo: stackModePopup.bottomAnchor, constant: 8),
             alignCheckbox.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
             alignCheckbox.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-            alignCheckbox.bottomAnchor.constraint(equalTo: methodCard.container.bottomAnchor),
+
+            trailRemovalCheckbox.topAnchor.constraint(equalTo: alignCheckbox.bottomAnchor, constant: 8),
+            trailRemovalCheckbox.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
+            trailRemovalCheckbox.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
+
+            analyzeTrailsButton.topAnchor.constraint(equalTo: trailRemovalCheckbox.bottomAnchor, constant: 6),
+            analyzeTrailsButton.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
+            analyzeTrailsButton.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
+
+            trailStatusBadge.topAnchor.constraint(equalTo: analyzeTrailsButton.bottomAnchor, constant: 4),
+            trailStatusBadge.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
+            trailStatusBadge.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
+            trailStatusBadge.bottomAnchor.constraint(equalTo: methodCard.container.bottomAnchor),
         ])
 
         // カード2: コンポジット & マスク
@@ -624,6 +664,7 @@ public class SettingsViewController: NSViewController {
 
     public func updateUI() {
         let state = StackingStateController.shared
+        let lightCount = state.count(for: .light)
 
         // レンズ情報更新
         if let meta = state.baseImageMetadata {
@@ -642,9 +683,20 @@ public class SettingsViewController: NSViewController {
             lensInfoParamsLabel.stringValue = ""
         }
 
+        // スタック設定・光跡除去更新
+        let isCompareBright = (state.stackMode == "Compare Bright")
+        trailRemovalCheckbox.isHidden = !isCompareBright
+        trailRemovalCheckbox.state = state.enableTrailRemoval ? .on : .off
+
+        analyzeTrailsButton.isHidden = !isCompareBright || !state.enableTrailRemoval
+        analyzeTrailsButton.isEnabled = !state.isAnalyzingTrails && lightCount >= 2
+        analyzeTrailsButton.title = state.isAnalyzingTrails ? "解析中 (\(Int(state.trailAnalysisProgress * 100))%)..." : "🔍 光跡を解析して確認…"
+
+        trailStatusBadge.isHidden = !isCompareBright || !state.enableTrailRemoval
+        trailStatusBadge.stringValue = state.trailAnalysisStatus
+
         // ボタンの有効化
-        let lightCount = state.count(for: .light)
-        startStackButton.isEnabled = !state.isStacking && lightCount > 0 && state.baseImage != nil
+        startStackButton.isEnabled = !state.isStacking && !state.isAnalyzingTrails && lightCount > 0 && state.baseImage != nil
         exportButton.isEnabled = (state.stackedResult != nil || state.previewImage != nil)
         statusLabel.stringValue = state.stackingStatus
 
@@ -655,6 +707,18 @@ public class SettingsViewController: NSViewController {
         frameRangeLabel.stringValue = "フレーム数: \(state.timelapseSettings.effectiveFrameCount) / 推定: \(String(format: "%.1f", state.timelapseSettings.estimatedDuration))秒"
         startTimelapseButton.isEnabled = !state.isExportingTimelapse && lightCount > 0
         timelapseStatusLabel.stringValue = state.timelapseStatus
+    }
+
+    // MARK: - 光跡レビューシート表示
+
+    private func presentTrailReview(items: [DetectedTrailItem]) {
+        guard !items.isEmpty else { return }
+        let reviewVC = TrailReviewViewController(items: items)
+        reviewVC.onConfirmed = { confirmedItems in
+            StackingStateController.shared.detectedTrails = confirmedItems
+            StackingStateController.shared.startStacking(forceDirectExecution: true)
+        }
+        presentAsSheet(reviewVC)
     }
 
     // MARK: - アクション
@@ -676,6 +740,14 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onAlignToggled() {
         StackingStateController.shared.enableAlignment = (alignCheckbox.state == .on)
+    }
+
+    @objc private func onTrailRemovalToggled() {
+        StackingStateController.shared.enableTrailRemoval = (trailRemovalCheckbox.state == .on)
+    }
+
+    @objc private func onAnalyzeTrailsClicked() {
+        StackingStateController.shared.analyzeTrails()
     }
 
     @objc private func onCompositeModeChanged() {

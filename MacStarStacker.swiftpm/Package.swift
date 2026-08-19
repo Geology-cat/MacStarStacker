@@ -34,7 +34,8 @@ let package = Package(
                     "-lopencv_imgcodecs",
                     "-lopencv_features2d",
                     "-lopencv_calib3d",
-                    "-lopencv_flann"
+                    "-lopencv_flann",
+                    "-lopencv_photo"
                 ], .when(platforms: [.macOS]))
             ]
         ),

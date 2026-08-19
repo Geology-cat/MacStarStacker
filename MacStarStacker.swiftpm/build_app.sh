@@ -48,7 +48,7 @@ fi
 OPENCV_LIB_DIR="$(pkg-config --variable=libdir opencv4 2>/dev/null || echo '/usr/local/opt/opencv/lib')"
 echo "=== Copying required OpenCV dylibs from $OPENCV_LIB_DIR ==="
 
-REQUIRED_MODULES=("core" "imgproc" "imgcodecs" "features2d" "calib3d" "flann")
+REQUIRED_MODULES=("core" "imgproc" "imgcodecs" "features2d" "calib3d" "flann" "photo")
 
 for MOD in "${REQUIRED_MODULES[@]}"; do
     for DYLIB in "$OPENCV_LIB_DIR"/libopencv_${MOD}*.dylib; do
