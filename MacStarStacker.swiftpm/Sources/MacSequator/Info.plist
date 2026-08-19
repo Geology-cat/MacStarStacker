@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>ja_JP</string>
+    <key>CFBundleDisplayName</key>
+    <string>MacStarStacker</string>
+    <key>CFBundleExecutable</key>
+    <string>MacStarStacker</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.local.macsequator</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>MacStarStacker</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.12</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 MacStarStacker. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <!-- Allow reading image files dragged onto the app -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>For image processing</string>
+    <!-- Needed to open image files via NSSavePanel or NSOpenPanel -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>To read and save image files</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>To read and save image files on the Desktop</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>To import images for stacking</string>
+</dict>
+</plist>

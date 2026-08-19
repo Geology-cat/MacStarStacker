@@ -1,0 +1,21 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode & SwiftPM build artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+
+# Packaged binaries and disk images (can be built from build_app.sh)
+MacStarStacker.app/
+*.dmg
+*.zip
+
+# Temporary files
+/tmp/
+*.tmp

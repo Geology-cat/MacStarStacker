@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>MacStarStacker &lpar;&#x661f;&#x666f;&#x5199;&#x771f;&#x7528;&#x30b0;&#x30e9;&#x30d5;&#x30a3;&#x30c3;&#x30af;&#x30c4;&#x30fc;&#x30eb;&rpar; - &#x4f7f;&#x3044;&#x65b9;&#x30ac;&#x30a4;&#x30c9;</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="macstarstacker-星景写真用グラフィックツール---使い方ガイド">MacStarStacker (星景写真用グラフィックツール) - 使い方ガイド</h1>
+<p>MacStarStackerは、星景写真のノイズ除去（スタッキング）、空と地上の分離合成、そして高度なタイムラプス動画作成を1つのアプリで実現するための専用ツールです。</p>
+<hr>
+<h2 id="-動作環境システム要件">🖥 動作環境（システム要件）</h2>
+<ul>
+<li><strong>対応OS</strong>: macOS 13.0 (Ventura) 以降</li>
+<li><strong>アーキテクチャ</strong>: Apple Silicon (M1/M2/M3等) 推奨 / Intel Mac対応</li>
+<li><strong>メモリ (RAM)</strong>: 8GB 以上必須（高解像度のRAW画像を多数扱う場合は16GB以上を推奨）</li>
+</ul>
+<h2 id="-対応データ形式">📸 対応データ形式</h2>
+<ul>
+<li><strong>入力フォーマット</strong>:
+<ul>
+<li>RAW画像 ( <code>.dng</code>, <code>.cr2</code>, <code>.cr3</code>, <code>.nef</code>, <code>.arw</code>, <code>.raf</code> など各社フォーマット )</li>
+<li>天文用・汎用高画質画像 ( <code>.tiff</code>, <code>.tif</code>, <code>.fit</code>, <code>.fits</code> )</li>
+<li>汎用画像 ( <code>.jpg</code>, <code>.jpeg</code>, <code>.png</code>, <code>.heic</code> )</li>
+</ul>
+</li>
+<li><strong>出力フォーマット</strong>:
+<ul>
+<li>スタック画像: <code>16bit TIFF</code>, <code>32bit FITS</code>, <code>DNG (RAW)</code>, <code>JPEG</code></li>
+<li>タイムラプス動画: <code>H.264 (.mp4)</code>, <code>H.265/HEVC (.mp4)</code></li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="-1-基本画面の構成">💻 1. 基本画面の構成</h2>
+<p>アプリ画面は大きく3つのパネルに分かれています。</p>
+<ul>
+<li>
+<p><strong>【左】画像ファイルパネル</strong></p>
+<ul>
+<li><strong>Light</strong>: 星が写っているメイン画像群。</li>
+<li><strong>Dark</strong>: センサーノイズ除去用のダーク画像（レンズキャップをして撮影した黒い画像）。</li>
+<li><strong>Flat / Bias</strong>: レンズの周辺減光やセンサーのバイアス補正用画像。</li>
+<li>** Base Image (基準画像)**: アライメント（位置合わせ）の基準となる、1枚の特別なLight画像です。Lightのファイルの☆マークで手動選択することもできます。</li>
+</ul>
+</li>
+<li>
+<p><strong>【中央】プレビュー＆マスク描画パネル</strong></p>
+<ul>
+<li>選択した画像のプレビュー、またはスタック・合成結果のプレビューが表示されます。</li>
+<li>「空＋地上」合成モードの際には、ここで直接空と地上の塗り分け（マスク）を行います。</li>
+<li>トラックパッドでピンチイン・アウト（拡大縮小）、ドラッグ（移動）が可能です。ダブルクリックでリセットします。</li>
+</ul>
+</li>
+<li>
+<p><strong>【右】設定・処理パネル</strong></p>
+<ul>
+<li>上部のタブで「スタック」と「タイムラプス」のモードを切り替えます。</li>
+<li>処理に関する詳細なパラメータや、書き出しフォーマットの指定を行います。</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="-2-スタッキングノイズ低減合成の手順">🌟 2. スタッキング（ノイズ低減合成）の手順</h2>
+<p>数枚〜数十枚の星空画像を重ね合わせ、ノイズのない滑らかな一枚の画像を作成します。</p>
+<h3 id="step-1-画像の読み込み">Step 1. 画像の読み込み</h3>
+<p>左のファイルパネルの「Light」タブに、処理したい星景画像をドラッグ＆ドロップするか、「＋」ボタンから追加します。
+※必要に応じて Dark / Flat / Bias 画像も追加してください。</p>
+<h3 id="step-2-コンポジットモードの選択">Step 2. コンポジットモードの選択</h3>
+<p>右の【設定・処理パネル】から「コンポジットモード」を選びます。</p>
+<ul>
+<li><strong>空・地上</strong>: 画像全体を均一に処理します（流星群の比較明合成や、星空単体、地上の風景単体を処理する場合など）。</li>
+<li><strong>空＋地上</strong>: 空（星）は日周運動に合わせて追尾・合成し、地上は動かずシャープに固定する、星景写真特有の高度な合成を行います。</li>
+</ul>
+<h3 id="step-3-マスクの作成空地上モードの場合のみ">Step 3. マスクの作成（空＋地上モードの場合のみ）</h3>
+<p>「空＋地上」モードを選択すると、中央パネルで「マスク描画」機能が有効になります。</p>
+<ol>
+<li>右パネルの「ブラシ」から <strong>空 (青)</strong> を選び、星空の部分を塗りつぶします。星が動く軌道全体を余裕を持って大まかに塗りつぶしてください。</li>
+<li>次に <strong>地上 (緑)</strong> を選び、動かしたくない地上風景を塗りつぶします。</li>
+<li><strong>サイズ</strong> と <strong>柔らかさ</strong> のスライダーを使い、空と地上の境界部分を自然に馴染むように（柔らかさを高くして）塗ると、より美しい合成になります。</li>
+<li>はみ出た場合は「消しゴム」で消すか、「マスクをクリア」ボタンで最初からやり直せます。</li>
+</ol>
+<h3 id="step-4-スタック設定と開始">Step 4. スタック設定と開始</h3>
+<ol>
+<li>必要に応じて「アライメント（位置合わせ）」をONにします（基本はON推奨）。</li>
+<li>出力フォーマット（16bit TIFF 等）を選びます。</li>
+<li><strong>「Start Stacking」</strong> ボタンを押して処理を開始します。</li>
+<li>プログレスバーが進行し、完了すると自動的に中央パネルに結果が表示されます。
+※画面下の「スタック結果を非表示」ボタンで、元の画像と結果を見比べることもできます。</li>
+</ol>
+<hr>
+<h2 id="-3-タイムラプス動画作成の手順">🎬 3. タイムラプス動画作成の手順</h2>
+<p>大量の静止画をつなぎ合わせて、高品質な星空タイムラプス映像（H.264 / HEVC）を書き出します。</p>
+<h3 id="step-1-画像の準備">Step 1. 画像の準備</h3>
+<p>スタック時と同様に、左パネルの「Light」タブにタイムラプス化したい全ての画像（連番画像）をドラッグ＆ドロップして追加します。</p>
+<h3 id="step-2-モード切り替え">Step 2. モード切り替え</h3>
+<p>右パネルの一番上のタブを <strong>「タイムラプス」</strong> に切り替えます。</p>
+<h3 id="step-3-タイムラプス設定">Step 3. タイムラプス設定</h3>
+<ul>
+<li><strong>フレーム範囲</strong>: 長い連番の中の一部だけを動画にしたい場合、開始・終了フレームを指定します。</li>
+<li><strong>再生速度</strong>:
+<ul>
+<li><strong>FPS指定</strong>: 1秒間に何枚の画像を表示するか（通常は24fpsか30fps）を直接指定します。</li>
+<li><strong>動画の長さ（秒）指定</strong>: 最終的に「10秒の動画にしたい」などの秒数を指定し、自動でFPSを算出させます。</li>
+</ul>
+</li>
+<li><strong>処理（高度な設定）</strong>:
+<ul>
+<li><strong>アライメント（位置合わせ）</strong>: 風や三脚の揺れで生じた微妙なズレを、1枚目の画像（Base Image）を基準にすべて自動で補正してつなぎ合わせます。（処理時間は長くなりますが、ブレの全くない滑らかな映像になります）</li>
+<li><strong>フリッカー除去 (輝度均一化)</strong>: 露出のばらつきによる動画の「チラつき」を自動で平滑化します。</li>
+<li><strong>オートストレッチ</strong>: RAWデータや暗い星空画像の明るさ・ガンマを、プレビュー品質に自動で引き上げて動画化します。</li>
+</ul>
+</li>
+</ul>
+<h3 id="step-4-書き出し">Step 4. 書き出し</h3>
+<ol>
+<li>一番下の <strong>「タイムラプスの書き出し」</strong> ボタンをクリックします。</li>
+<li>保存先とファイル名（.mp4）を指定するダイアログが出るので決定します。</li>
+<li>エンコード処理が非同期で始まり、進捗がテキストで表示されます。バックグラウンドで処理が進むため、完了までしばらくお待ちください。</li>
+</ol>
+<hr>
+<h2 id="-4-その他の便利機能tips">💡 4. その他の便利機能・Tips</h2>
+<ul>
+<li><strong>元に戻す（Undo機能）</strong>: 上部のメニューバー「編集（Edit）」＞「元に戻す (Undo)」を選択するか <code>Command + Z</code> で、間違えて画像を消してしまった際などに1つ前の操作に戻れます。</li>
+<li><strong>画像の個別確認</strong>: 左パネルのリストから特定の画像をクリックすると、中央のプレビューにその画像が大きく表示されます。</li>
+<li><strong>ファイルリストのクリア</strong>: 画像タブ名の横にあるゴミ箱ボタンを押すと、そのタブの画像をすべて一括で削除できます。（Light画像を消すと、設定されていた基準画像などのメタデータも自動的に初期化されます）。</li>
+</ul>
+
+            
+            
+        </body>
+        </html>
