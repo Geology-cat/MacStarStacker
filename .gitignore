@@ -11,10 +11,10 @@ DerivedData/
 *.xcuserstate
 *.xcuserdata/
 
-# Distribution build output (built by MacStarStacker.swiftpm/build_app.sh)
-/dist/
+# Distribution build output
+/dist/*
+!/dist/*.dmg
 *.app
-*.dmg
 *.zip
 
 # Temporary files
