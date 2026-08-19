@@ -47,6 +47,11 @@ let package = Package(
             resources: [
                 .process("Metal/Stacking.metal")
             ]
+        ),
+        .testTarget(
+            name: "OpenCVWrapperTests",
+            dependencies: ["OpenCVWrapper"],
+            path: "Tests/OpenCVWrapperTests"
         )
     ]
 )

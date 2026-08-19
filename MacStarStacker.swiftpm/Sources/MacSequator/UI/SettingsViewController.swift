@@ -699,11 +699,19 @@ public class SettingsViewController: NSViewController {
 
         // スタック設定・光跡除去更新
         let isCompareBright = (state.stackMode == "Compare Bright")
+        // 比較明合成で位置合わせすると星の軌跡が点に戻るため、常にOFFにする。
+        alignCheckbox.isEnabled = !isCompareBright
+        if isCompareBright {
+            alignCheckbox.state = .off
+            state.enableAlignment = false
+        } else {
+            alignCheckbox.state = state.enableAlignment ? .on : .off
+        }
         trailRemovalCheckbox.isHidden = !isCompareBright
         trailRemovalCheckbox.state = state.enableTrailRemoval ? .on : .off
 
         analyzeTrailsButton.isHidden = !isCompareBright || !state.enableTrailRemoval
-        analyzeTrailsButton.isEnabled = !state.isAnalyzingTrails && lightCount >= 2
+        analyzeTrailsButton.isEnabled = !state.isAnalyzingTrails && lightCount >= 3
         analyzeTrailsButton.title = state.isAnalyzingTrails ? "解析中 (\(Int(state.trailAnalysisProgress * 100))%)..." : "🔍 光跡を解析して確認…"
 
         trailStatusBadge.isHidden = !isCompareBright || !state.enableTrailRemoval
@@ -747,7 +755,9 @@ public class SettingsViewController: NSViewController {
         switch stackModePopup.indexOfSelectedItem {
         case 0: StackingStateController.shared.stackMode = "Average"
         case 1: StackingStateController.shared.stackMode = "Median"
-        case 2: StackingStateController.shared.stackMode = "Compare Bright"
+        case 2:
+            StackingStateController.shared.stackMode = "Compare Bright"
+            StackingStateController.shared.enableAlignment = false
         default: StackingStateController.shared.stackMode = "Average"
         }
     }

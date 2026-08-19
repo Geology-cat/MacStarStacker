@@ -262,7 +262,7 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
             previewImageView.image = item.highlightedImage
         }
 
-        let meteorStr = item.isLikelyMeteor ? "🌠 流星の可能性: 高 (非対称バースト)" : "人工物 (飛行機/衛星/車)"
+        let meteorStr = item.isLikelyMeteor ? "🌠 流星候補 (端点非対称・要確認)" : "人工物候補 (飛行機/衛星/車)"
         let removalStr = item.isMarkedForRemoval ? "【 除去対象 】" : "【 保護 (残す) 】"
         infoLabel.stringValue = "フレーム #\(item.frameIndex + 1) (\(item.file.name)) | タイプ: \(item.detectedType) | 信頼度: \(Int(item.confidenceScore * 100))% | \(meteorStr) \(removalStr)"
 
@@ -372,7 +372,7 @@ class TrailRowCellView: NSTableCellView {
     func configure(item: DetectedTrailItem) {
         titleLabel.stringValue = "フレーム #\(item.frameIndex + 1): \(item.file.name)"
         subtitleLabel.stringValue = item.detectedType
-        tagLabel.stringValue = item.isLikelyMeteor ? "🌠 流星疑い" : "✈️ 人工光跡"
+        tagLabel.stringValue = item.isLikelyMeteor ? "🌠 流星候補" : "✈️ 人工光跡候補"
         tagLabel.textColor = item.isLikelyMeteor ? NSColor.systemGreen : NSColor.systemOrange
     }
 }

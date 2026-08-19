@@ -31,6 +31,12 @@ NS_ASSUME_NONNULL_BEGIN
                          prevFrameURL:(nullable NSURL *)prevURL
                          nextFrameURL:(nullable NSURL *)nextURL;
 
+/// 複数の候補マスクを統合し、前後フレームのロバストな中央値で修復する
++ (nullable NSImage *)inpaintImageAtURL:(NSURL *)targetURL
+                              withMasks:(NSArray<NSImage *> *)maskImages
+                          prevFrameURL:(nullable NSURL *)prevURL
+                          nextFrameURL:(nullable NSURL *)nextURL;
+
 @end
 
 NS_ASSUME_NONNULL_END

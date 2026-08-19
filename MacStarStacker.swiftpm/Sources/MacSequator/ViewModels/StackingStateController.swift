@@ -61,6 +61,7 @@ class StackingStateController {
     var isAnalyzingTrails: Bool = false { didSet { notifyStateChanged() } }
     var trailAnalysisProgress: Double = 0.0 { didSet { notifyStateChanged() } }
     var trailAnalysisStatus: String = "" { didSet { notifyStateChanged() } }
+    private var trailAnalysisGeneration: UInt64 = 0
 
     // ── コールバック ──
     var onStateChanged: (() -> Void)? = nil
@@ -88,6 +89,7 @@ class StackingStateController {
         images = last.images
         baseImage = last.baseImage
         previewImage = last.previewImage
+        invalidateTrailAnalysis()
         updateBaseImageMetadata()
         notifyStateChanged()
     }
@@ -101,6 +103,14 @@ class StackingStateController {
     }
 
     // MARK: - ファイル管理
+
+    /// Lightの並びや内容が変わったとき、以前のフレーム番号に紐づくマスクを破棄する。
+    private func invalidateTrailAnalysis() {
+        trailAnalysisGeneration &+= 1
+        detectedTrails = []
+        trailAnalysisProgress = 0.0
+        trailAnalysisStatus = ""
+    }
 
     func add(urls: [URL], to type: ImageType) {
         saveUndoSnapshot()
@@ -116,6 +126,7 @@ class StackingStateController {
             if previewImage == nil { previewImage = file }
         }
         images[type] = current
+        if type == .light { invalidateTrailAnalysis() }
         notifyStateChanged()
 
         // バックグラウンドでメタデータを解析
@@ -164,6 +175,7 @@ class StackingStateController {
     func remove(file: ImageFile, from type: ImageType) {
         saveUndoSnapshot()
         images[type]?.removeAll { $0.id == file.id }
+        if type == .light { invalidateTrailAnalysis() }
         if previewImage?.id == file.id { previewImage = images[type]?.first }
         if baseImage?.id == file.id   { baseImage = images[.light]?.first }
         notifyStateChanged()
@@ -174,6 +186,7 @@ class StackingStateController {
         images[type]?.removeAll()
         if type == .light {
             baseImage = nil
+            invalidateTrailAnalysis()
         }
         notifyStateChanged()
     }
@@ -224,12 +237,14 @@ class StackingStateController {
 
     func analyzeTrails(completion: (([DetectedTrailItem]) -> Void)? = nil) {
         let lightFiles = images[.light] ?? []
-        guard lightFiles.count >= 2 else {
-            stackingStatus = "⚠️ 光跡解析には2枚以上のLight画像が必要です"
+        guard lightFiles.count >= 3 else {
+            stackingStatus = "⚠️ 光跡解析には3枚以上のLight画像が必要です"
             notifyStateChanged()
             return
         }
 
+        trailAnalysisGeneration &+= 1
+        let generation = trailAnalysisGeneration
         isAnalyzingTrails = true
         trailAnalysisProgress = 0.0
         trailAnalysisStatus = "フレームを解析中..."
@@ -242,6 +257,7 @@ class StackingStateController {
 
             let results = TrailCleaner.detectTrails(inImageURLs: urls) { progress, status in
                 DispatchQueue.main.async {
+                    guard self.trailAnalysisGeneration == generation else { return }
                     self.trailAnalysisProgress = progress
                     self.trailAnalysisStatus = status
                     self.notifyStateChanged()
@@ -266,6 +282,10 @@ class StackingStateController {
             }
 
             DispatchQueue.main.async {
+                guard self.trailAnalysisGeneration == generation else {
+                    self.isAnalyzingTrails = false
+                    return
+                }
                 self.isAnalyzingTrails = false
                 self.trailAnalysisProgress = 1.0
                 self.detectedTrails = items
@@ -325,7 +345,8 @@ class StackingStateController {
         let biasFiles  = images[.bias]  ?? []
         let mode       = stackMode
         let compMode   = compositingMode
-        let doAlign    = enableAlignment
+        // 比較明合成では星の軌跡を保つため、アライメントを強制的に無効化する。
+        let doAlign    = (mode == "Compare Bright") ? false : enableAlignment
         let mask       = maskBitmap
         let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
         let trailItems = self.detectedTrails
@@ -354,10 +375,13 @@ class StackingStateController {
                 var rawImg: NSImage? = nil
 
                 // 光跡除去が有効な場合、該当フレームの光跡をインペイント修復
-                if trailRemovalActive, let trail = trailItems.first(where: { $0.frameIndex == i && $0.isMarkedForRemoval }), let mask = trail.maskImage {
+                let masks = trailRemovalActive
+                    ? trailItems.filter { $0.frameIndex == i && $0.isMarkedForRemoval }.compactMap { $0.maskImage }
+                    : []
+                if trailRemovalActive, !masks.isEmpty {
                     let prevUrl = (i > 0) ? lightFiles[i - 1].url : nil
                     let nextUrl = (i < total - 1) ? lightFiles[i + 1].url : nil
-                    rawImg = TrailCleaner.inpaintImage(at: lf.url, withMask: mask, prevFrameURL: prevUrl, nextFrameURL: nextUrl)
+                    rawImg = TrailCleaner.inpaintImage(at: lf.url, withMasks: masks, prevFrameURL: prevUrl, nextFrameURL: nextUrl)
                 }
 
                 if rawImg == nil {
