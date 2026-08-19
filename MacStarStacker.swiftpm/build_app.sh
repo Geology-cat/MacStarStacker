@@ -1,14 +1,15 @@
 #!/bin/bash
-# build_app.sh — MacStarStacker .app builder
-# Run this from inside MacStarStacker.swiftpm:
-#   bash build_app.sh
+# build_app.sh — MacStarStacker .app & .dmg builder
+# Output: dist/MacStarStacker.app, dist/MacStarStacker.dmg
 set -e
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
+DIST_DIR="$PROJ_DIR/../dist"
 BUILD_DIR="$PROJ_DIR/.build/release"
 APP_NAME="MacStarStacker"          # display name of the .app
-BIN_NAME="MacSequator"             # SPM executable product name (unchanged)
-APP_DIR="$PROJ_DIR/../${APP_NAME}.app"
+BIN_NAME="MacSequator"             # SPM executable product name
+APP_DIR="$DIST_DIR/${APP_NAME}.app"
+DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
 CONTENTS="$APP_DIR/Contents"
 BIN_SRC="$BUILD_DIR/$BIN_NAME"
 BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
@@ -18,7 +19,8 @@ echo "=== Building release binary ==="
 cd "$PROJ_DIR"
 swift build -c release
 
-echo "=== Assembling .app bundle ==="
+echo "=== Assembling .app bundle in dist/ ==="
+mkdir -p "$DIST_DIR"
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS/MacOS"
 mkdir -p "$CONTENTS/Resources"
@@ -94,9 +96,14 @@ fi
 # 6. Remove quarantine attribute (allows double-click to open)
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
+# 7. Create DMG image in dist/
+echo "=== Packaging DMG image in dist/ ==="
+rm -f "$DMG_PATH"
+hdiutil create -volname "$APP_NAME" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" > /dev/null
+
 echo ""
 echo "=== Done! ==="
-echo "App bundle created at:"
-echo "  $APP_DIR"
+echo "App bundle: $APP_DIR"
+echo "DMG image:  $DMG_PATH"
 echo ""
 echo "To open: open \"$APP_DIR\""

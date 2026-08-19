@@ -27,6 +27,34 @@ macOS 10.12 (Sierra) から 最新の macOS 15+ (Sequoia) まで完全対応し�
 
 ---
 
+## 📁 ディレクトリ構成
+
+```text
+MacStarStacker/
+├── dist/                              # 配布用バイナリ成果物 (.app, .dmg)
+│   ├── MacStarStacker.app
+│   └── MacStarStacker.dmg
+├── docs/                              # ドキュメント・仕様書・マニュアル
+│   ├── specification.md               # アプリケーション詳細仕様書
+│   ├── installation_guide.md          # インストール＆起動ガイド (Markdown)
+│   ├── installation_guide.html        # インストール＆起動ガイド (HTML)
+│   ├── user_manual.html               # ユーザーマニュアル (HTML)
+│   ├── インストールと初回起動ガイド.pdf  # PDF形式ガイド
+│   └── assets/                        # アイコン・画像素材
+├── scripts/                           # 補助スクリプト
+│   └── fix_dylib_bundling.py
+├── MacStarStacker.swiftpm/            # Swift/C++ ソースコード & ビルド設定
+│   ├── Package.swift
+│   ├── build_app.sh                   # dist/ にビルド・パッケージングするスクリプト
+│   └── Sources/
+│       ├── MacSequator/               # AppKit UI, コントローラ, 画像処理エンジン
+│       └── OpenCVWrapper/             # OpenCV C++ アライメントラッパー
+├── .gitignore
+└── README.md
+```
+
+---
+
 ## 🔨 ビルド方法
 
 ### 前提条件
@@ -35,12 +63,12 @@ macOS 10.12 (Sierra) から 最新の macOS 15+ (Sequoia) まで完全対応し�
 - OpenCV (Homebrew): `brew install opencv`
 - ExifTool (推奨): `brew install exiftool`
 
-### アプリケーションのビルド (.app)
+### アプリケーションおよびDMGのビルド
 ```bash
 cd MacStarStacker.swiftpm
 bash build_app.sh
 ```
-ビルドが完了すると、プロジェクトルートに `MacStarStacker.app` が生成されます。
+ビルドが完了すると、`dist/` 配下に `MacStarStacker.app` および `MacStarStacker.dmg` が自動生成されます。
 
 ---
 

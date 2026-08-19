@@ -11,8 +11,9 @@ DerivedData/
 *.xcuserstate
 *.xcuserdata/
 
-# Packaged binaries and disk images (can be built from build_app.sh)
-MacStarStacker.app/
+# Distribution build output (built by MacStarStacker.swiftpm/build_app.sh)
+/dist/
+*.app
 *.dmg
 *.zip
 
