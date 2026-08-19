@@ -10,10 +10,12 @@ APP_NAME="MacStarStacker"          # display name of the .app
 BIN_NAME="MacSequator"             # SPM executable product name
 APP_DIR="$DIST_DIR/${APP_NAME}.app"
 DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
+DMG_STAGING="$PROJ_DIR/.build/dmg_staging"
 CONTENTS="$APP_DIR/Contents"
 BIN_SRC="$BUILD_DIR/$BIN_NAME"
 BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
 INFO_PLIST="$PROJ_DIR/Sources/MacSequator/Info.plist"
+ICNS_SRC="$PROJ_DIR/Sources/MacSequator/AppIcon.icns"
 
 echo "=== Building release binary ==="
 cd "$PROJ_DIR"
@@ -30,7 +32,7 @@ mkdir -p "$CONTENTS/Frameworks"
 cp "$BIN_SRC" "$CONTENTS/MacOS/$APP_NAME"
 
 # 2. Copy Info.plist
-cp "$PROJ_DIR/Sources/MacSequator/Info.plist" "$CONTENTS/Info.plist"
+cp "$INFO_PLIST" "$CONTENTS/Info.plist"
 
 # 3. Copy Metal + resource bundle
 if [ -d "$BUNDLE_SRC" ]; then
@@ -38,7 +40,6 @@ if [ -d "$BUNDLE_SRC" ]; then
 fi
 
 # 4. Copy app icon
-ICNS_SRC="$PROJ_DIR/Sources/MacSequator/AppIcon.icns"
 if [ -f "$ICNS_SRC" ]; then
     cp "$ICNS_SRC" "$CONTENTS/Resources/AppIcon.icns"
     echo "Icon: AppIcon.icns copied"
@@ -96,10 +97,81 @@ fi
 # 6. Remove quarantine attribute (allows double-click to open)
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
-# 7. Create DMG image in dist/
+# 7. Build Gatekeeper Unlock AppleScript Application
+echo "=== Building Gatekeeper Unlock AppleScript App ==="
+GATEKEEPER_APP="$DMG_STAGING/初回起動（Gatekeeper解除）.app"
+rm -rf "$DMG_STAGING"
+mkdir -p "$DMG_STAGING"
+
+# AppleScript source code
+APPLESCRIPT_SRC="$PROJ_DIR/.build/unlock_gatekeeper.applescript"
+cat << 'EOF' > "$APPLESCRIPT_SRC"
+tell application "Finder"
+	set currentFolder to POSIX path of ((container of (path to me)) as text)
+	set localApp to currentFolder & "MacStarStacker.app"
+	set installedApp to "/Applications/MacStarStacker.app"
+end tell
+
+try
+	do shell script "xattr -dr com.apple.quarantine " & quoted form of localApp & " 2>/dev/null || true"
+	do shell script "xattr -dr com.apple.quarantine " & quoted form of installedApp & " 2>/dev/null || true"
+	
+	set res to display dialog "Gatekeeperのセキュリティ制限（未確認の開発元警告）を解除しました。" & return & return & "MacStarStacker を起動しますか？" buttons {"キャンセル", "起動する"} default button "起動する" with title "MacStarStacker 初回起動アシスタント" with icon note
+	
+	if button returned of res is "起動する" then
+		try
+			do shell script "open " & quoted form of installedApp
+		on error
+			do shell script "open " & quoted form of localApp
+		end try
+	end if
+on error errMsg
+	display alert "エラーが発生しました" message errMsg as critical
+end try
+EOF
+
+osacompile -o "$GATEKEEPER_APP" "$APPLESCRIPT_SRC"
+
+# Copy AppIcon to Gatekeeper unlock app if available
+if [ -f "$ICNS_SRC" ]; then
+    cp "$ICNS_SRC" "$GATEKEEPER_APP/Contents/Resources/applet.icns"
+fi
+
+# 8. Assemble DMG Staging Area
+echo "=== Preparing DMG Contents ==="
+# Copy .app to staging
+cp -R "$APP_DIR" "$DMG_STAGING/"
+
+# Create symlink to /Applications
+ln -s /Applications "$DMG_STAGING/Applications"
+
+# Create README note for DMG
+cat << 'EOF' > "$DMG_STAGING/はじめにお読みください.txt"
+MacStarStacker インストール＆初回起動ガイド
+=============================================
+
+【インストール方法】
+1. 「MacStarStacker.app」を「Applications」フォルダへドラッグ＆ドロップしてください。
+
+【初回起動時の注意（Gatekeeper警告が出る場合）】
+macOSのセキュリティ機能により「開発元が未確認のため開けません」と表示された場合は、
+同梱の「初回起動（Gatekeeper解除）.app」をダブルクリックして実行してください。
+セキュリティ制限が解除され、正常に起動できるようになります。
+
+または、以下のいずれかの方法でも起動可能です：
+・「MacStarStacker.app」を右クリック（二本指タップ）し、メニューから「開く」を選択する。
+・「システム設定（システム環境設定）」>「プライバシーとセキュリティ」から「このまま開く」をクリックする。
+
+対応OS: macOS 10.12 (Sierra) 〜 macOS 15+ (Sequoia)
+EOF
+
+# 9. Create DMG package
 echo "=== Packaging DMG image in dist/ ==="
 rm -f "$DMG_PATH"
-hdiutil create -volname "$APP_NAME" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" > /dev/null
+hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" > /dev/null
+
+# Clean staging
+rm -rf "$DMG_STAGING" "$APPLESCRIPT_SRC"
 
 echo ""
 echo "=== Done! ==="
