@@ -72,6 +72,7 @@ public class SettingsViewController: NSViewController {
     private let lensInfoLensLabel = NSTextField(labelWithString: "")
     private let lensInfoParamsLabel = NSTextField(labelWithString: "")
     private let embedLensCheckbox = NSButton(checkboxWithTitle: "DNGにレンズプロファイルを埋め込む", target: nil, action: nil)
+    private let lensHintLabel = NSTextField(labelWithString: "Lightroom等で開いた際にレンズ補正が自動適用されます")
     private let customLensField = NSTextField()
 
     // フォーマット & アクション
@@ -203,8 +204,8 @@ public class SettingsViewController: NSViewController {
 
         analyzeTrailsButton.translatesAutoresizingMaskIntoConstraints = false
         analyzeTrailsButton.title = "🔍 光跡を解析して確認…"
-        analyzeTrailsButton.bezelStyle = .roundRect
-        analyzeTrailsButton.font = NSFont.systemFont(ofSize: 11)
+        analyzeTrailsButton.bezelStyle = .rounded
+        analyzeTrailsButton.font = NSFont.boldSystemFont(ofSize: 12)
         analyzeTrailsButton.target = self
         analyzeTrailsButton.action = #selector(onAnalyzeTrailsClicked)
 
@@ -235,6 +236,7 @@ public class SettingsViewController: NSViewController {
             analyzeTrailsButton.topAnchor.constraint(equalTo: trailRemovalCheckbox.bottomAnchor, constant: 6),
             analyzeTrailsButton.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
             analyzeTrailsButton.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
+            analyzeTrailsButton.heightAnchor.constraint(equalToConstant: 28),
 
             trailStatusBadge.topAnchor.constraint(equalTo: analyzeTrailsButton.bottomAnchor, constant: 4),
             trailStatusBadge.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
@@ -335,10 +337,9 @@ public class SettingsViewController: NSViewController {
         embedLensCheckbox.target = self
         embedLensCheckbox.action = #selector(onEmbedLensToggled)
 
-        let hintLabel = NSTextField(labelWithString: "Lightroom等で開いた際にレンズ補正が自動適用されます")
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.font = NSFont.systemFont(ofSize: 9)
-        hintLabel.textColor = .secondaryLabelColor
+        lensHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        lensHintLabel.font = NSFont.systemFont(ofSize: 9)
+        lensHintLabel.textColor = .secondaryLabelColor
 
         customLensField.translatesAutoresizingMaskIntoConstraints = false
         customLensField.placeholderString = "手動レンズ名 (例: FE 20mm F1.8 G)"
@@ -350,7 +351,7 @@ public class SettingsViewController: NSViewController {
         lensCard.container.addSubview(lensInfoLensLabel)
         lensCard.container.addSubview(lensInfoParamsLabel)
         lensCard.container.addSubview(embedLensCheckbox)
-        lensCard.container.addSubview(hintLabel)
+        lensCard.container.addSubview(lensHintLabel)
         lensCard.container.addSubview(customLensField)
 
         NSLayoutConstraint.activate([
@@ -370,11 +371,11 @@ public class SettingsViewController: NSViewController {
             embedLensCheckbox.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
             embedLensCheckbox.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
 
-            hintLabel.topAnchor.constraint(equalTo: embedLensCheckbox.bottomAnchor, constant: 2),
-            hintLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor, constant: 18),
-            hintLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
+            lensHintLabel.topAnchor.constraint(equalTo: embedLensCheckbox.bottomAnchor, constant: 2),
+            lensHintLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor, constant: 18),
+            lensHintLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
 
-            customLensField.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 6),
+            customLensField.topAnchor.constraint(equalTo: lensHintLabel.bottomAnchor, constant: 6),
             customLensField.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
             customLensField.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
             customLensField.bottomAnchor.constraint(equalTo: lensCard.container.bottomAnchor),
@@ -683,6 +684,19 @@ public class SettingsViewController: NSViewController {
             lensInfoParamsLabel.stringValue = ""
         }
 
+        // レンズプロファイル設定の有効・無効化（RAW/DNG専用）
+        let isDNG = (state.exportFormat == .dng)
+        embedLensCheckbox.isEnabled = isDNG
+        embedLensCheckbox.title = isDNG ? "DNGにレンズプロファイルを埋め込む" : "レンズプロファイル埋め込み (DNG専用)"
+        customLensField.isEnabled = isDNG && state.embedLensProfile
+        if isDNG {
+            lensHintLabel.stringValue = "Lightroom等で開いた際にレンズ補正が自動適用されます"
+            lensHintLabel.textColor = .secondaryLabelColor
+        } else {
+            lensHintLabel.stringValue = "※ レンズプロファイル埋め込みは RAW (DNG) 出力時のみ有効です"
+            lensHintLabel.textColor = NSColor(red: 1.0, green: 0.6, blue: 0.2, alpha: 1.0)
+        }
+
         // スタック設定・光跡除去更新
         let isCompareBright = (state.stackMode == "Compare Bright")
         trailRemovalCheckbox.isHidden = !isCompareBright
@@ -788,6 +802,7 @@ public class SettingsViewController: NSViewController {
         case 3: StackingStateController.shared.exportFormat = .jpeg
         default: StackingStateController.shared.exportFormat = .dng
         }
+        updateUI()
     }
 
     @objc private func onStartStackClicked() {
