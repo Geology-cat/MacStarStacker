@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: ソースを取得
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 100 MB以上の追跡ファイルを検査
         shell: bash
@@ -39,7 +39,11 @@ jobs:
           fi
 
       - name: OpenCVを準備
-        run: brew install opencv pkg-config
+        shell: bash
+        run: |
+          # macOSランナーに残る未信頼の外部tapを外し、Homebrewの警告を防ぐ。
+          brew untap aws/tap 2>/dev/null || true
+          brew install opencv pkg-config
 
       - name: 全テストを実行
         run: swift test --package-path MacStarStacker.swiftpm
