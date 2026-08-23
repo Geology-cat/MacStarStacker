@@ -1,6 +1,6 @@
 import Cocoa
 
-/// アプリケーションデリゲート（macOS 10.12+ 互換）
+/// アプリケーションデリゲート（macOS 14+）
 public class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var mainWindowController: MainWindowController?
@@ -52,7 +52,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         // 3. 編集メニュー
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "編集")
-        editMenu.addItem(withTitle: "取り消す (Undo)", action: #selector(onUndo), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "取り消す", action: #selector(onUndo), keyEquivalent: "z")
+        editMenu.addItem(NSMenuItem.separator())
+        // 標準レスポンダーチェーンへ渡す。NSOpenPanel 内でも ⌘A が有効になる。
+        editMenu.addItem(withTitle: "切り取り", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "コピー", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "貼り付け", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "すべてを選択", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "マスクをクリア", action: #selector(onClearMask), keyEquivalent: "k")
         editMenuItem.submenu = editMenu
@@ -80,13 +86,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - メニューアクション
 
     @objc private func onAddLightFiles() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseFiles = true
-        panel.allowedFileTypes = [
-            "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2", "dng", "pef",
-            "tif", "tiff", "fit", "fits", "jpg", "jpeg", "png"
-        ]
+        let panel = ImageImportSupport.makeOpenPanel(title: "Light画像を選択")
         panel.begin { response in
             guard response == .OK else { return }
             StackingStateController.shared.add(urls: panel.urls, to: .light)
@@ -109,6 +109,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func onClearMask() {
+        guard StackingStateController.shared.enableSkyGroundMask else { return }
         StackingStateController.shared.maskBitmap = nil
     }
 

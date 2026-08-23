@@ -1,6 +1,6 @@
 import Cocoa
 
-/// アプリケーションのメインウィンドウコントローラ（macOS 10.12+ 互換）
+/// アプリケーションのメインウィンドウコントローラ（macOS 14+）
 public class MainWindowController: NSWindowController {
 
     public convenience init() {

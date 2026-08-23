@@ -55,6 +55,7 @@ public struct DetectedTrailItem: Identifiable, Hashable {
     public let id = UUID()
     public var frameIndex: Int
     public var file: ImageFile
+    public var originalImage: NSImage?
     public var maskImage: NSImage?
     public var highlightedImage: NSImage?
     public var repairedImage: NSImage?

@@ -17,35 +17,41 @@ class ImageStacker {
     static func stack(images: [NSImage], mode: StackMode = .average) -> NSImage? {
         guard !images.isEmpty else { return nil }
 
-        // Convert all images to Float32 pixel buffers, RGBA
-        let floatBuffers = images.compactMap { floatBuffer(from: $0) }
-        guard !floatBuffers.isEmpty else { return nil }
-
-        let (width, height) = (floatBuffers[0].width, floatBuffers[0].height)
+        guard let firstBuffer = floatBuffer(from: images[0]) else { return nil }
+        let (width, height) = (firstBuffer.width, firstBuffer.height)
         let pixelCount = width * height * 4 // RGBA channels
-
-        var resultPixels = [Float](repeating: 0, count: pixelCount)
+        var resultPixels = firstBuffer.pixels
 
         switch mode {
         case .average:
-            for buf in floatBuffers {
+            for image in images.dropFirst() {
+                guard let buf = floatBuffer(from: image),
+                      buf.width == width, buf.height == height else { return nil }
                 vDSP_vadd(resultPixels, 1, buf.pixels, 1, &resultPixels, 1, vDSP_Length(pixelCount))
             }
-            var divisor = Float(floatBuffers.count)
+            var divisor = Float(images.count)
             vDSP_vsdiv(resultPixels, 1, &divisor, &resultPixels, 1, vDSP_Length(pixelCount))
 
         case .median:
+            let remainingBuffers = images.dropFirst().compactMap { floatBuffer(from: $0) }
+            guard remainingBuffers.count == images.count - 1,
+                  remainingBuffers.allSatisfy({ $0.width == width && $0.height == height }) else { return nil }
+            let floatBuffers = [firstBuffer] + remainingBuffers
             let count = floatBuffers.count
             for i in 0..<pixelCount {
                 var values = floatBuffers.map { $0.pixels[i] }
                 values.sort()
-                resultPixels[i] = values[count / 2]
+                if count.isMultiple(of: 2) {
+                    resultPixels[i] = (values[count / 2 - 1] + values[count / 2]) / 2.0
+                } else {
+                    resultPixels[i] = values[count / 2]
+                }
             }
 
         case .compareBright:
-            // Initialize with first frame then take per-pixel max
-            resultPixels = floatBuffers[0].pixels
-            for buf in floatBuffers.dropFirst() {
+            for image in images.dropFirst() {
+                guard let buf = floatBuffer(from: image),
+                      buf.width == width, buf.height == height else { return nil }
                 vDSP_vmax(resultPixels, 1, buf.pixels, 1, &resultPixels, 1, vDSP_Length(pixelCount))
             }
         }
@@ -66,36 +72,46 @@ class ImageStacker {
         let width = cgImage.width
         let height = cgImage.height
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let floatPixels = pixels.map { Float($0) / 255.0 }
-        return FloatBuffer(pixels: floatPixels, width: width, height: height)
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let baseAddress = bytes.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 32,
+                    bytesPerRow: width * 16,
+                    space: colorSpace,
+                    bitmapInfo: CGBitmapInfo.floatComponents.rawValue
+                        | CGBitmapInfo.byteOrder32Little.rawValue
+                        | CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+        return FloatBuffer(pixels: pixels, width: width, height: height)
     }
 
     private static func nsImage(from pixels: [Float], width: Int, height: Int) -> NSImage? {
-        let uint8Pixels = pixels.map { UInt8(max(0, min(255, $0 * 255.0))) }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let provider = CGDataProvider(data: Data(uint8Pixels) as CFData),
+        let uint16Pixels = pixels.map { value -> UInt16 in
+            guard value.isFinite else { return 0 }
+            return UInt16(max(0, min(65_535, value * 65_535.0)).rounded())
+        }
+        let data = uint16Pixels.withUnsafeBytes { Data($0) }
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
                   width: width,
                   height: height,
-                  bitsPerComponent: 8,
-                  bitsPerPixel: 32,
-                  bytesPerRow: width * 4,
+                  bitsPerComponent: 16,
+                  bitsPerPixel: 64,
+                  bytesPerRow: width * 8,
                   space: colorSpace,
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  bitmapInfo: CGBitmapInfo(rawValue:
+                    CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+                  ),
                   provider: provider,
                   decode: nil,
                   shouldInterpolate: false,

@@ -3,6 +3,7 @@ import AVFoundation
 import AppKit
 import CoreImage
 import OpenCVWrapper
+import UniformTypeIdentifiers
 
 // MARK: - Timelapse Settings Model
 struct TimelapseSettings {
@@ -21,8 +22,6 @@ struct TimelapseSettings {
 
     var fps: Double = 24.0
     var targetDuration: Double = 10.0       // Used when durationMode is .duration
-    var blendFrames: Int = 0
-
     // ── Stabilization ─────────────────────────────────────────────────
     var alignFrames: Bool = false           // align each frame to base for stabilization
 
@@ -80,20 +79,18 @@ struct TimelapseSettings {
 
     var effectiveFps: Double {
         switch durationMode {
-        case .fps: return fps
-        case .duration: return Double(effectiveFrameCount) / max(0.1, targetDuration)
+        case .fps: return min(120.0, max(1.0, fps))
+        case .duration:
+            return min(120.0, max(1.0, Double(effectiveFrameCount) / max(1.0, targetDuration)))
         }
     }
 
     var estimatedDuration: Double {
-        switch durationMode {
-        case .fps: return Double(effectiveFrameCount) / max(0.1, fps)
-        case .duration: return targetDuration
-        }
+        Double(effectiveFrameCount) / effectiveFps
     }
 }
 
-// MARK: - TimelapseExporter (macOS 10.12+ 互換)
+// MARK: - TimelapseExporter (macOS 14+)
 class TimelapseExporter {
 
     struct ExportError: Error, LocalizedError {
@@ -110,7 +107,7 @@ class TimelapseExporter {
     ) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
-            panel.allowedFileTypes = ["mp4"]
+            panel.allowedContentTypes = [.mpeg4Movie]
             panel.nameFieldStringValue = "MacStarStacker_Timelapse.mp4"
             panel.begin { response in
                 guard response == .OK, let url = panel.url else {
@@ -141,7 +138,7 @@ class TimelapseExporter {
     }
 
     // MARK: - Core render function
-    private static func renderTimelapse(
+    static func renderTimelapse(
         imageFiles: [ImageFile],
         settings: TimelapseSettings,
         baseFile: ImageFile?,
@@ -159,30 +156,36 @@ class TimelapseExporter {
 
         var refLuminance: Double? = nil
         if settings.deflicker,
-           let firstImg = NSImage(contentsOf: selectedFiles[0].url) {
+           let firstImg = ImageLoader.load(from: selectedFiles[0].url) {
             refLuminance = averageLuminance(of: firstImg)
         }
 
-        guard let firstNS = NSImage(contentsOf: selectedFiles[0].url),
+        guard let firstNS = ImageLoader.load(from: selectedFiles[0].url),
               let firstCG = firstNS.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw ExportError(message: "最初の画像を読み込めませんでした")
         }
         let origSize = CGSize(width: firstCG.width, height: firstCG.height)
         let outSize  = settings.resolution.size(for: origSize)
-        let outWidth  = Int(outSize.width)
-        let outHeight = Int(outSize.height)
+        // H.264 / HEVC が要求する偶数サイズへ丸める。
+        let outWidth  = max(2, Int(outSize.width).isMultiple(of: 2) ? Int(outSize.width) : Int(outSize.width) - 1)
+        let outHeight = max(2, Int(outSize.height).isMultiple(of: 2) ? Int(outSize.height) : Int(outSize.height) - 1)
+        if settings.codec == .hevc, outWidth < 320 || outHeight < 240 {
+            throw ExportError(message: "HEVC書き出しには320×240以上の解像度が必要です")
+        }
 
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(url: outputURL, fileType: .mp4)
-        let videoSettings: [String: Any] = [
+        var videoSettings: [String: Any] = [
             AVVideoCodecKey: settings.codec.avCodec.rawValue,
             AVVideoWidthKey:  outWidth,
-            AVVideoHeightKey: outHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: outWidth * outHeight * 4,
+            AVVideoHeightKey: outHeight
+        ]
+        if settings.codec == .h264 {
+            videoSettings[AVVideoCompressionPropertiesKey] = [
+                AVVideoAverageBitRateKey: max(1_000_000, outWidth * outHeight * 4),
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
             ]
-        ]
+        }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         input.expectsMediaDataInRealTime = false
 
@@ -194,19 +197,43 @@ class TimelapseExporter {
                 kCVPixelBufferHeightKey as String: outHeight
             ]
         )
+        guard writer.canAdd(input) else {
+            throw ExportError(message: "選択したコーデックをこのMacで利用できません")
+        }
         writer.add(input)
-        writer.startWriting()
+        guard writer.startWriting() else {
+            throw writer.error ?? ExportError(message: "動画エンコーダーを開始できませんでした")
+        }
         writer.startSession(atSourceTime: .zero)
+        defer {
+            if writer.status == .writing { writer.cancelWriting() }
+        }
 
         let tFps = max(1.0, settings.effectiveFps)
-        let frameDuration = CMTime(value: 1000, timescale: CMTimeScale(tFps * 1000))
+        let frameDuration = CMTime(seconds: 1.0 / tFps, preferredTimescale: 60_000)
+
+        var baseReferenceURL: URL?
+        if settings.alignFrames, let baseFile = baseFile {
+            guard let baseImage = ImageLoader.load(from: baseFile.url),
+                  let tempURL = writeTemporaryTIFF(baseImage, prefix: "timelapse_base") else {
+                throw ExportError(message: "位置合わせの基準画像を準備できませんでした")
+            }
+            baseReferenceURL = tempURL
+        }
+        defer {
+            if let baseReferenceURL = baseReferenceURL {
+                try? FileManager.default.removeItem(at: baseReferenceURL)
+            }
+        }
 
         for (idx, file) in selectedFiles.enumerated() {
             DispatchQueue.main.async {
                 progress(Double(idx) / Double(total), "フレームを処理中 (\(idx+1)/\(total))...")
             }
 
-            guard var nsImage = NSImage(contentsOf: file.url) else { continue }
+            guard var nsImage = ImageLoader.load(from: file.url) else {
+                throw ExportError(message: "画像を読み込めませんでした: \(file.name)")
+            }
 
             if settings.deflicker, let ref = refLuminance {
                 let lum = averageLuminance(of: nsImage)
@@ -219,28 +246,36 @@ class TimelapseExporter {
                 nsImage = applyStretch(to: nsImage, gamma: settings.gamma, ev: settings.exposure) ?? nsImage
             }
 
-            if settings.alignFrames, let base = baseFile, file.url != base.url {
-                let tempUrl = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("cal_\(UUID().uuidString).tiff")
-                if let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    let rep = NSBitmapImageRep(cgImage: cg)
-                    try? rep.representation(using: .tiff, properties: [:])?.write(to: tempUrl)
-                    let aligned = (try? ImageAligner.alignImage(at: tempUrl, toBaseImageAt: base.url)) ?? nsImage
-                    nsImage = aligned
-                    try? FileManager.default.removeItem(at: tempUrl)
+            if settings.alignFrames,
+               let base = baseFile,
+               let referenceURL = baseReferenceURL,
+               file.url != base.url {
+                guard let targetURL = writeTemporaryTIFF(nsImage, prefix: "timelapse_align") else {
+                    throw ExportError(message: "位置合わせ用画像を準備できませんでした: \(file.name)")
                 }
+                defer { try? FileManager.default.removeItem(at: targetURL) }
+                let aligned = try ImageAligner.alignImage(at: targetURL, toBaseImageAt: referenceURL)
+                nsImage = aligned
             }
 
             guard let pixelBuffer = pixelBuffer(
                 from: nsImage, width: outWidth, height: outHeight
-            ) else { continue }
+            ) else {
+                throw ExportError(message: "動画フレームを生成できませんでした: \(file.name)")
+            }
 
             let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(idx))
 
-            while !input.isReadyForMoreMediaData {
+            let readyDeadline = Date().addingTimeInterval(30)
+            while !input.isReadyForMoreMediaData && writer.status == .writing && Date() < readyDeadline {
                 Thread.sleep(forTimeInterval: 0.005) // 5ms
             }
-            adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+            guard writer.status == .writing, input.isReadyForMoreMediaData else {
+                throw writer.error ?? ExportError(message: "動画エンコーダーが応答しませんでした")
+            }
+            guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
+                throw writer.error ?? ExportError(message: "動画フレームの追加に失敗しました")
+            }
         }
 
         input.markAsFinished()
@@ -249,9 +284,11 @@ class TimelapseExporter {
         writer.finishWriting {
             semaphore.signal()
         }
-        semaphore.wait()
+        guard semaphore.wait(timeout: .now() + 120) == .success else {
+            throw ExportError(message: "動画の完了処理がタイムアウトしました")
+        }
 
-        if writer.status == .failed {
+        if writer.status != .completed {
             throw writer.error ?? ExportError(message: "書き出しに失敗しました")
         }
 
@@ -285,9 +322,10 @@ class TimelapseExporter {
 
     private static func scaleLuminance(image: NSImage, factor: Double) -> NSImage? {
         guard let ci = CIImage(data: image.tiffRepresentation ?? Data()) else { return nil }
-        guard let filter = CIFilter(name: "CIColorControls") else { return nil }
+        guard let filter = CIFilter(name: "CIExposureAdjust") else { return nil }
         filter.setValue(ci, forKey: kCIInputImageKey)
-        filter.setValue(Float(min(max(factor, 0.1), 4.0)), forKey: kCIInputBrightnessKey)
+        let clampedFactor = min(max(factor, 0.25), 4.0)
+        filter.setValue(log2(clampedFactor), forKey: kCIInputEVKey)
         guard let out = filter.outputImage else { return nil }
         let ctx = CIContext()
         guard let cg = ctx.createCGImage(out, from: out.extent) else { return nil }
@@ -329,7 +367,33 @@ class TimelapseExporter {
                             bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
                             space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                             | CGBitmapInfo.byteOrder32Little.rawValue)
-        ctx?.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let ctx = ctx else { return nil }
+        ctx.setFillColor(NSColor.black.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let scale = min(CGFloat(width) / CGFloat(cg.width), CGFloat(height) / CGFloat(cg.height))
+        let drawSize = CGSize(width: CGFloat(cg.width) * scale, height: CGFloat(cg.height) * scale)
+        let drawRect = CGRect(
+            x: (CGFloat(width) - drawSize.width) / 2,
+            y: (CGFloat(height) - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        ctx.draw(cg, in: drawRect)
         return buffer
+    }
+
+    private static func writeTemporaryTIFF(_ image: NSImage, prefix: String) -> URL? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let data = NSBitmapImageRep(cgImage: cg).representation(using: .tiff, properties: [:]) else {
+            return nil
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacStarStacker_\(prefix)_\(UUID().uuidString).tiff")
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
     }
 }

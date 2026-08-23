@@ -1,14 +1,15 @@
 import Cocoa
 
-/// 検出された光跡の確認・流星保護用レビューシートコントローラ（macOS 10.12+ 互換）
+/// 検出された光跡の確認・流星保護用レビューシートコントローラ（macOS 14+）
 public class TrailReviewViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
 
     private var trailItems: [DetectedTrailItem] = []
     private var selectedIndex: Int = 0
-    private var previewMode: Int = 0 // 0: ハイライト, 1: 除去後, 2: 2値マスク
+    private var previewMode: Int = 0 // 0: 検出画像, 1: 除去後, 2: 2値マスク
+    private var showsTrailHighlight = true
 
-    private let titleLabel = NSTextField(labelWithString: "✈️ 飛行機・人工衛星の光跡確認 ＆ 流星の保護")
-    private let descriptionLabel = NSTextField(labelWithString: "検出された光跡の一覧です。流星（流れ星）など残したい光跡は「除去」のチェックを外してください。")
+    private let titleLabel = NSTextField(labelWithString: "✈️ 光跡の確認と流星の保護")
+    private let descriptionLabel = NSTextField(labelWithString: "ハイライトを切り替えて元画像を確認し、残す光跡は「除去」をOFFにしてください。")
 
     // 左ペイン: テーブル
     private let scrollView = NSScrollView()
@@ -19,6 +20,11 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
 
     // 右ペイン: プレビュー
     private let previewSegmentedControl = NSSegmentedControl()
+    private let highlightCheckbox = NSButton(
+        checkboxWithTitle: "光跡ハイライトを表示",
+        target: nil,
+        action: nil
+    )
     private let previewImageView = NSImageView()
     private let infoLabel = NSTextField(labelWithString: "")
 
@@ -28,6 +34,7 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
 
     public var onConfirmed: (([DetectedTrailItem]) -> Void)?
     public var onCancelled: (() -> Void)?
+    public var onDismissRequested: (() -> Void)?
 
     public init(items: [DetectedTrailItem]) {
         self.trailItems = items
@@ -39,14 +46,83 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
     }
 
     override public func loadView() {
-        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 920, height: 600))
+        let size = Self.contentSize(for: NSScreen.main?.visibleFrame)
+        self.view = NSView(frame: NSRect(origin: .zero, size: size))
         self.view.wantsLayer = true
     }
 
     override public func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
-        updateSelectionPreview()
+        if !trailItems.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        } else {
+            updateSelectionPreview()
+        }
+    }
+
+    /// 小さな画面でも可視領域をはみ出さないコンパクトなシートサイズ。
+    static func contentSize(for visibleFrame: NSRect?) -> NSSize {
+        guard let frame = visibleFrame else { return NSSize(width: 720, height: 440) }
+        return NSSize(
+            width: max(640, min(720, frame.width - 120)),
+            height: max(380, min(440, frame.height - 160))
+        )
+    }
+
+    static let minimumContentSize = NSSize(width: 640, height: 380)
+
+    /// 現在の画面内で、タイトルバーとドラッグ余白を残して広げられる最大サイズ。
+    static func maximumContentSize(for visibleFrame: NSRect?) -> NSSize {
+        guard let frame = visibleFrame else { return NSSize(width: 1_280, height: 800) }
+        return NSSize(
+            width: max(minimumContentSize.width, frame.width - 80),
+            height: max(minimumContentSize.height, frame.height - 120)
+        )
+    }
+
+    static func previewImage(
+        for item: DetectedTrailItem,
+        mode: Int,
+        showsHighlight: Bool
+    ) -> NSImage? {
+        switch mode {
+        case 1:
+            return item.repairedImage ?? item.originalImage ?? item.highlightedImage
+        case 2:
+            return item.maskImage
+        default:
+            if showsHighlight {
+                return item.highlightedImage ?? item.originalImage
+            }
+            return item.originalImage ?? item.highlightedImage
+        }
+    }
+
+    /// 初期表示はコンパクトに保ちつつ、候補の細部を見たいときは拡大できるレビューウィンドウ。
+    func makeReviewWindow() -> NSWindow {
+        loadViewIfNeeded()
+        let size = Self.contentSize(for: NSScreen.main?.visibleFrame)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "光跡の確認と流星の保護"
+        window.contentViewController = self
+        window.contentMinSize = Self.minimumContentSize
+        window.contentMaxSize = Self.maximumContentSize(for: NSScreen.main?.visibleFrame)
+        window.setContentSize(size)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    override public func viewDidLayout() {
+        super.viewDidLayout()
+        // 改行幅を現在のウィンドウ幅へ追従させ、拡大時にも情報領域を有効活用する。
+        descriptionLabel.preferredMaxLayoutWidth = max(200, view.bounds.width - 32)
+        infoLabel.preferredMaxLayoutWidth = max(200, view.bounds.width - 328)
     }
 
     private func setupUI() {
@@ -61,11 +137,14 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
         descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
         descriptionLabel.font = NSFont.systemFont(ofSize: 12)
         descriptionLabel.textColor = .secondaryLabelColor
+        descriptionLabel.lineBreakMode = .byTruncatingTail
+        descriptionLabel.preferredMaxLayoutWidth = view.bounds.width - 32
+        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.addSubview(descriptionLabel)
 
         // ── 左ペイン: 一括操作ボタン ──
         protectMeteorsButton.translatesAutoresizingMaskIntoConstraints = false
-        protectMeteorsButton.title = "🌠 流星を自動保護 (チェック解除)"
+        protectMeteorsButton.title = "🌠 流星候補を保護"
         protectMeteorsButton.bezelStyle = .roundRect
         protectMeteorsButton.font = NSFont.systemFont(ofSize: 11)
         protectMeteorsButton.target = self
@@ -116,13 +195,20 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
         // ── 右ペイン: プレビュー ──
         previewSegmentedControl.translatesAutoresizingMaskIntoConstraints = false
         previewSegmentedControl.segmentCount = 3
-        previewSegmentedControl.setLabel("🔴 光跡ハイライト", forSegment: 0)
-        previewSegmentedControl.setLabel("✨ 除去後プレビュー", forSegment: 1)
-        previewSegmentedControl.setLabel("🔲 光跡マスク", forSegment: 2)
+        previewSegmentedControl.setLabel("検出画像", forSegment: 0)
+        previewSegmentedControl.setLabel("除去後", forSegment: 1)
+        previewSegmentedControl.setLabel("マスク", forSegment: 2)
         previewSegmentedControl.selectedSegment = 0
         previewSegmentedControl.target = self
         previewSegmentedControl.action = #selector(onPreviewModeChanged)
         view.addSubview(previewSegmentedControl)
+
+        highlightCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        highlightCheckbox.state = .on
+        highlightCheckbox.target = self
+        highlightCheckbox.action = #selector(onHighlightToggled)
+        highlightCheckbox.font = NSFont.systemFont(ofSize: 11)
+        view.addSubview(highlightCheckbox)
 
         previewImageView.translatesAutoresizingMaskIntoConstraints = false
         previewImageView.imageScaling = .scaleProportionallyUpOrDown
@@ -131,11 +217,19 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
         previewImageView.layer?.borderWidth = 1
         previewImageView.layer?.borderColor = NSColor(white: 0.25, alpha: 1.0).cgColor
         previewImageView.layer?.backgroundColor = NSColor.black.cgColor
+        previewImageView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        previewImageView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        previewImageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewImageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         view.addSubview(previewImageView)
 
         infoLabel.translatesAutoresizingMaskIntoConstraints = false
         infoLabel.font = NSFont.systemFont(ofSize: 11)
         infoLabel.textColor = .secondaryLabelColor
+        infoLabel.maximumNumberOfLines = 2
+        infoLabel.lineBreakMode = .byWordWrapping
+        infoLabel.preferredMaxLayoutWidth = view.bounds.width - 328
+        infoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.addSubview(infoLabel)
 
         // ── 下部ボタン ──
@@ -156,17 +250,17 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
 
         // ── AutoLayout ──
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            titleLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
 
             descriptionLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
-            descriptionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            descriptionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            descriptionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            descriptionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
 
             // 一括操作ボタン
-            protectMeteorsButton.topAnchor.constraint(equalTo: descriptionLabel.bottomAnchor, constant: 12),
-            protectMeteorsButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            protectMeteorsButton.widthAnchor.constraint(equalToConstant: 190),
+            protectMeteorsButton.topAnchor.constraint(equalTo: descriptionLabel.bottomAnchor, constant: 8),
+            protectMeteorsButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            protectMeteorsButton.widthAnchor.constraint(equalToConstant: 145),
 
             selectAllButton.topAnchor.constraint(equalTo: descriptionLabel.bottomAnchor, constant: 12),
             selectAllButton.leadingAnchor.constraint(equalTo: protectMeteorsButton.trailingAnchor, constant: 6),
@@ -179,33 +273,36 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
             // 左ペイン: テーブル
             scrollView.topAnchor.constraint(equalTo: protectMeteorsButton.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            scrollView.widthAnchor.constraint(equalToConstant: 320),
-            scrollView.bottomAnchor.constraint(equalTo: cancelButton.topAnchor, constant: -16),
+            scrollView.widthAnchor.constraint(equalToConstant: 280),
+            scrollView.bottomAnchor.constraint(equalTo: cancelButton.topAnchor, constant: -12),
 
             // 右ペイン: プレビュー切替
             previewSegmentedControl.topAnchor.constraint(equalTo: protectMeteorsButton.topAnchor),
-            previewSegmentedControl.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 16),
-            previewSegmentedControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            previewSegmentedControl.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 12),
+            previewSegmentedControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+
+            highlightCheckbox.topAnchor.constraint(equalTo: previewSegmentedControl.bottomAnchor, constant: 4),
+            highlightCheckbox.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 12),
 
             // 右ペイン: プレビュー画像
-            previewImageView.topAnchor.constraint(equalTo: previewSegmentedControl.bottomAnchor, constant: 8),
-            previewImageView.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 16),
-            previewImageView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            previewImageView.topAnchor.constraint(equalTo: highlightCheckbox.bottomAnchor, constant: 4),
+            previewImageView.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 12),
+            previewImageView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             previewImageView.bottomAnchor.constraint(equalTo: infoLabel.topAnchor, constant: -6),
 
             // 右ペイン: 情報
-            infoLabel.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 16),
-            infoLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            infoLabel.bottomAnchor.constraint(equalTo: cancelButton.topAnchor, constant: -16),
+            infoLabel.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: 12),
+            infoLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            infoLabel.bottomAnchor.constraint(equalTo: cancelButton.topAnchor, constant: -12),
 
             // 下部ボタン
-            cancelButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            cancelButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
             cancelButton.trailingAnchor.constraint(equalTo: applyAndStackButton.leadingAnchor, constant: -12),
             cancelButton.widthAnchor.constraint(equalToConstant: 90),
 
-            applyAndStackButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-            applyAndStackButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            applyAndStackButton.widthAnchor.constraint(equalToConstant: 200),
+            applyAndStackButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
+            applyAndStackButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            applyAndStackButton.widthAnchor.constraint(equalToConstant: 190),
         ])
     }
 
@@ -253,14 +350,12 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
         }
 
         let item = trailItems[selectedIndex]
-        switch previewMode {
-        case 1:
-            previewImageView.image = item.repairedImage ?? item.highlightedImage
-        case 2:
-            previewImageView.image = item.maskImage
-        default:
-            previewImageView.image = item.highlightedImage
-        }
+        previewImageView.image = Self.previewImage(
+            for: item,
+            mode: previewMode,
+            showsHighlight: showsTrailHighlight
+        )
+        highlightCheckbox.isEnabled = previewMode == 0
 
         let meteorStr = item.isLikelyMeteor ? "🌠 流星候補 (端点非対称・要確認)" : "人工物候補 (飛行機/衛星/車)"
         let removalStr = item.isMarkedForRemoval ? "【 除去対象 】" : "【 保護 (残す) 】"
@@ -274,6 +369,11 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
 
     @objc private func onPreviewModeChanged() {
         previewMode = previewSegmentedControl.selectedSegment
+        updateSelectionPreview()
+    }
+
+    @objc private func onHighlightToggled() {
+        showsTrailHighlight = highlightCheckbox.state == .on
         updateSelectionPreview()
     }
 
@@ -312,12 +412,20 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func onCancelClicked() {
-        dismiss(self)
+        if let onDismissRequested {
+            onDismissRequested()
+        } else {
+            dismiss(self)
+        }
         onCancelled?()
     }
 
     @objc private func onApplyClicked() {
-        dismiss(self)
+        if let onDismissRequested {
+            onDismissRequested()
+        } else {
+            dismiss(self)
+        }
         onConfirmed?(trailItems)
     }
 }

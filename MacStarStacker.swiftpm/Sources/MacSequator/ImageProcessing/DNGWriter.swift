@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-/// DNG 1.4 / 1.6 規格に準拠した 16-bit リニアDNG (Linear RAW) を書き出すライター
+/// DNG 1.4互換の16-bitリニアDNG (Linear RAW) を書き出すライター
 public enum DNGWriter {
 
     /// 16-bit リニアDNGを生成してファイルに保存する
@@ -62,7 +62,7 @@ public enum DNGWriter {
 
         try dngData.write(to: url, options: .atomic)
 
-        // 3. システムにexiftoolが存在し、かつ元RAWファイルがある場合は、MakerNotesや追加レンズタグを完全同期
+        // 3. ExifToolと元RAWがある場合は、対応する追加タグのコピーを試みる。
         if embedLensProfile, let sourceURL = meta.sourceURL, let exiftool = RawMetadataExtractor.findExiftool() {
             syncExifToolTags(sourceURL: sourceURL, targetURL: url, exiftoolPath: exiftool, metadata: meta)
         }
@@ -242,30 +242,47 @@ public enum DNGWriter {
         ifd0Tags.sort { $0.tag < $1.tag }
         ifd0TableSize = 2 + ifd0Tags.count * 12 + 4
 
-        let ifd0ExtraDataOffset = UInt32(8 + ifd0TableSize)
+        let ifd0TableEnd = UInt32(8 + ifd0TableSize)
+        let ifd0ExtraDataOffset = ifd0TableEnd % 2 == 0 ? ifd0TableEnd : ifd0TableEnd + 1
         
         // IFD0 Extra Data をシリアライズしてオフセットを解決
         var resolvedIFD0Entries: [(tag: UInt16, type: UInt16, count: UInt32, valueOrOffset: UInt32)] = []
         for tag in ifd0Tags {
-            let res = serializeTag(tag, baseOffset: ifd0ExtraDataOffset + UInt32(ifd0ExtraData.count), extraData: &ifd0ExtraData)
+            let res = serializeTag(tag, baseOffset: ifd0ExtraDataOffset, extraData: &ifd0ExtraData)
             resolvedIFD0Entries.append(res)
+        }
+        if ifd0ExtraData.count % 2 != 0 {
+            ifd0ExtraData.append(0)
         }
 
         let exifIFDOffset = ifd0ExtraDataOffset + UInt32(ifd0ExtraData.count)
         var exifTableSize = 0
+        var exifExtraDataOffset = exifIFDOffset
         var resolvedEXIFEntries: [(tag: UInt16, type: UInt16, count: UInt32, valueOrOffset: UInt32)] = []
 
         if !exifTags.isEmpty {
             exifTableSize = 2 + exifTags.count * 12 + 4
-            let exifExtraDataOffset = exifIFDOffset + UInt32(exifTableSize)
+            let exifTableEnd = exifIFDOffset + UInt32(exifTableSize)
+            exifExtraDataOffset = exifTableEnd % 2 == 0 ? exifTableEnd : exifTableEnd + 1
             for tag in exifTags {
-                let res = serializeTag(tag, baseOffset: exifExtraDataOffset + UInt32(exifExtraData.count), extraData: &exifExtraData)
+                let res = serializeTag(tag, baseOffset: exifExtraDataOffset, extraData: &exifExtraData)
                 resolvedEXIFEntries.append(res)
+            }
+            if exifExtraData.count % 2 != 0 {
+                exifExtraData.append(0)
             }
         }
 
         let xmpOffset = exifIFDOffset + UInt32(exifTableSize) + UInt32(exifExtraData.count)
-        let pixelDataOffset = xmpOffset + UInt32(xmpData.count)
+        let xmpDataEnd = xmpOffset + UInt32(xmpData.count)
+        let pixelDataOffset = xmpDataEnd % 2 == 0 ? xmpDataEnd : xmpDataEnd + 1
+
+        func appendPadding(to offset: UInt32, in data: inout Data) {
+            let padding = Int(offset) - data.count
+            if padding > 0 {
+                data.append(Data(repeating: 0, count: padding))
+            }
+        }
 
         // IFD0内の ExifIFDPointer, XMP, StripOffsets のオフセット値を更新
         for i in 0..<resolvedIFD0Entries.count {
@@ -296,6 +313,7 @@ public enum DNGWriter {
         ifd0Data.append(contentsOf: [0, 0, 0, 0]) // Next IFD = 0
 
         data.append(ifd0Data)
+        appendPadding(to: ifd0ExtraDataOffset, in: &data)
         data.append(ifd0ExtraData)
 
         // EXIF Table
@@ -315,6 +333,7 @@ public enum DNGWriter {
             }
             exifData.append(contentsOf: [0, 0, 0, 0]) // Next IFD = 0
             data.append(exifData)
+            appendPadding(to: exifExtraDataOffset, in: &data)
             data.append(exifExtraData)
         }
 
@@ -322,6 +341,7 @@ public enum DNGWriter {
         if !xmpData.isEmpty {
             data.append(xmpData)
         }
+        appendPadding(to: pixelDataOffset, in: &data)
 
         // Pixel Data (16-bit little-endian RGB)
         pixels.withUnsafeBytes {
@@ -332,6 +352,12 @@ public enum DNGWriter {
     }
 
     private static func serializeTag(_ tag: TIFFTag, baseOffset: UInt32, extraData: inout Data) -> (tag: UInt16, type: UInt16, count: UInt32, valueOrOffset: UInt32) {
+        // TIFFの外部値はワード境界へ配置する。特にUTF-8の日本語メタデータは
+        // バイト数が奇数になりやすく、奇数オフセットのままだとExifToolが警告する。
+        func alignWord() {
+            if extraData.count % 2 != 0 { extraData.append(0) }
+        }
+
         switch tag.valueOrData {
         case .inline(let val):
             return (tag.tag, tag.type, tag.count, val)
@@ -344,7 +370,8 @@ public enum DNGWriter {
                 }
                 return (tag.tag, tag.type, tag.count, val)
             } else {
-                let offset = baseOffset
+                alignWord()
+                let offset = baseOffset + UInt32(extraData.count)
                 extraData.append(contentsOf: bytes)
                 return (tag.tag, tag.type, tag.count, offset)
             }
@@ -357,7 +384,8 @@ public enum DNGWriter {
                 }
                 return (tag.tag, tag.type, tag.count, val)
             } else {
-                let offset = baseOffset
+                alignWord()
+                let offset = baseOffset + UInt32(extraData.count)
                 for s in shorts {
                     let sLE = s.littleEndian
                     extraData.append(contentsOf: withUnsafeBytes(of: sLE, Array.init))
@@ -369,7 +397,8 @@ public enum DNGWriter {
             if longs.count == 1 {
                 return (tag.tag, tag.type, tag.count, longs[0])
             } else {
-                let offset = baseOffset
+                alignWord()
+                let offset = baseOffset + UInt32(extraData.count)
                 for l in longs {
                     let lLE = l.littleEndian
                     extraData.append(contentsOf: withUnsafeBytes(of: lLE, Array.init))
@@ -386,13 +415,15 @@ public enum DNGWriter {
                 }
                 return (tag.tag, tag.type, tag.count, val)
             } else {
-                let offset = baseOffset
+                alignWord()
+                let offset = baseOffset + UInt32(extraData.count)
                 extraData.append(contentsOf: utf8Bytes)
                 return (tag.tag, tag.type, tag.count, offset)
             }
 
         case .rationals(let rationals):
-            let offset = baseOffset
+            alignWord()
+            let offset = baseOffset + UInt32(extraData.count)
             for (num, den) in rationals {
                 let numLE = num.littleEndian
                 let denLE = den.littleEndian
@@ -402,7 +433,8 @@ public enum DNGWriter {
             return (tag.tag, tag.type, tag.count, offset)
 
         case .srationals(let srationals):
-            let offset = baseOffset
+            alignWord()
+            let offset = baseOffset + UInt32(extraData.count)
             for (num, den) in srationals {
                 let numLE = num.littleEndian
                 let denLE = den.littleEndian
@@ -478,7 +510,7 @@ public enum DNGWriter {
             .replacingOccurrences(of: "'", with: "&apos;")
     }
 
-    // MARK: - ExifTool による MakerNotes / OpcodeList 完全同期
+    // MARK: - ExifTool による追加メタデータコピー
 
     private static func syncExifToolTags(sourceURL: URL, targetURL: URL, exiftoolPath: String, metadata: RawMetadataInfo) {
         let process = Process()

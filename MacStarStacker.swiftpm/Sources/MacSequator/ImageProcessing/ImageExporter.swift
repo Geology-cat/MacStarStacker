@@ -1,8 +1,14 @@
 import Foundation
 import AppKit
+import UniformTypeIdentifiers
 
 /// スタック後の画像を指定フォーマットで書き出すクラス
 class ImageExporter {
+
+    struct ExportError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
 
     enum ExportFormat: String, CaseIterable, Identifiable {
         case dng    = "RAW (DNG)"
@@ -26,50 +32,66 @@ class ImageExporter {
         image: NSImage,
         format: ExportFormat,
         metadata: RawMetadataInfo? = nil,
-        embedLensProfile: Bool = true
+        embedLensProfile: Bool = true,
+        completion: ((Result<URL, Error>) -> Void)? = nil
     ) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
-            panel.allowedFileTypes = [format.fileExtension]
+            if let contentType = UTType(filenameExtension: format.fileExtension) {
+                panel.allowedContentTypes = [contentType]
+            }
             panel.nameFieldStringValue = "stacked_result.\(format.fileExtension)"
             panel.begin { response in
                 guard response == .OK, let url = panel.url else { return }
-                switch format {
-                case .dng:
-                    saveDNG(image: image, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
-                case .tiff16:
-                    save16bitTIFF(image: image, metadata: metadata, to: url)
-                case .fits32:
-                    save32bitFITS(image: image, to: url)
-                case .jpeg:
-                    saveJPEG(image: image, to: url)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result: Result<URL, Error>
+                    do {
+                        try write(
+                            image: image, format: format, metadata: metadata,
+                            embedLensProfile: embedLensProfile, to: url
+                        )
+                        result = .success(url)
+                    } catch {
+                        result = .failure(error)
+                    }
+                    DispatchQueue.main.async {
+                        completion?(result)
+                        if completion == nil, case .failure(let error) = result {
+                            let alert = NSAlert(error: error)
+                            alert.runModal()
+                        }
+                    }
                 }
             }
         }
     }
 
-    // MARK: - DNG (16-bit Linear DNG with Lens Profile)
-    private static func saveDNG(
+    /// UIを介さず指定URLへ書き出す。自動テストと一括処理でも使用する。
+    static func write(
         image: NSImage,
-        metadata: RawMetadataInfo?,
-        embedLensProfile: Bool,
+        format: ExportFormat,
+        metadata: RawMetadataInfo? = nil,
+        embedLensProfile: Bool = true,
         to url: URL
-    ) {
-        do {
-            try DNGWriter.write(
-                image: image,
-                metadata: metadata,
-                embedLensProfile: embedLensProfile,
-                to: url
-            )
-        } catch {
-            print("DNG書き出しエラー: \(error.localizedDescription)")
+    ) throws {
+        switch format {
+        case .dng:
+            try DNGWriter.write(image: image, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+        case .tiff16:
+            try save16bitTIFF(image: image, metadata: metadata, to: url)
+        case .fits32:
+            try save32bitFITS(image: image, to: url)
+        case .jpeg:
+            try saveJPEG(image: image, to: url)
         }
     }
 
+    // MARK: - DNG (16-bit Linear DNG with Lens Profile)
     // MARK: - 16bit TIFF
-    private static func save16bitTIFF(image: NSImage, metadata: RawMetadataInfo?, to url: URL) {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+    private static func save16bitTIFF(image: NSImage, metadata: RawMetadataInfo?, to url: URL) throws {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ExportError(message: "TIFF用画像を取得できませんでした")
+        }
 
         let width = cgImage.width
         let height = cgImage.height
@@ -87,48 +109,55 @@ class ImageExporter {
             bytesPerRow: bytesPerRow,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Big.rawValue
-        ) else { return }
+        ) else { throw ExportError(message: "16bit TIFFの描画領域を作成できませんでした") }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        if let rendered = context.makeImage() {
-            let rep = NSBitmapImageRep(cgImage: rendered)
-            if let data = rep.representation(using: .tiff, properties: [:]) {
-                try? data.write(to: url)
-                
-                // ExifToolが存在する場合はメタデータをTIFFにも同期
-                if let meta = metadata, let src = meta.sourceURL, let exiftool = RawMetadataExtractor.findExiftool() {
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: exiftool)
-                    process.arguments = ["-tagsFromFile", src.path, "-all:all>all:all", "-overwrite_original", url.path]
-                    try? process.run()
-                    process.waitUntilExit()
-                }
-            }
+        guard let rendered = context.makeImage(),
+              let data = NSBitmapImageRep(cgImage: rendered).representation(using: .tiff, properties: [:]) else {
+            throw ExportError(message: "16bit TIFFデータを生成できませんでした")
+        }
+        try data.write(to: url, options: .atomic)
+
+        // ExifToolが存在する場合はメタデータをTIFFにも同期
+        if let meta = metadata, let src = meta.sourceURL, let exiftool = RawMetadataExtractor.findExiftool() {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: exiftool)
+            process.arguments = ["-tagsFromFile", src.path, "-all:all>all:all", "-overwrite_original", url.path]
+            try? process.run()
+            process.waitUntilExit()
         }
     }
 
     // MARK: - 32bit FITS
     /// Writes a minimal monochrome FITS file (grayscale luminance, float32 per pixel).
-    private static func save32bitFITS(image: NSImage, to url: URL) {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+    private static func save32bitFITS(image: NSImage, to url: URL) throws {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ExportError(message: "FITS用画像を取得できませんでした")
+        }
         let width = cgImage.width
         let height = cgImage.height
 
-        // Render to 8bpc grayscale first
+        // リニア32bit浮動小数点グレースケールへ直接描画し、16bit入力の階調を保持する。
         let colorSpace = CGColorSpaceCreateDeviceGray()
-        var gray = [UInt8](repeating: 0, count: width * height)
-        guard let ctx = CGContext(
-            data: &gray,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return }
-
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var gray = [Float](repeating: 0, count: width * height)
+        let rendered = gray.withUnsafeMutableBytes { bytes -> Bool in
+            guard let baseAddress = bytes.baseAddress,
+                  let ctx = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 32,
+                    bytesPerRow: width * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGBitmapInfo.floatComponents.rawValue
+                        | CGBitmapInfo.byteOrder32Little.rawValue
+                        | CGImageAlphaInfo.none.rawValue
+                  ) else { return false }
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { throw ExportError(message: "FITS用画素データを生成できませんでした") }
 
         // Build a minimal valid FITS header (36 header cards, each 80 bytes = 2880-byte block)
         let naxis1 = width
@@ -157,7 +186,7 @@ class ImageExporter {
         // FITS pixels: big-endian Float32. FITS stores bottom-left first, so flip vertically.
         for row in stride(from: height - 1, through: 0, by: -1) {
             for col in 0..<width {
-                let pixelValue = Float(gray[row * width + col]) / 255.0
+                let pixelValue = gray[row * width + col]
                 var bigEndian = pixelValue.bitPattern.bigEndian
                 withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
             }
@@ -169,16 +198,19 @@ class ImageExporter {
             data.append(contentsOf: [UInt8](repeating: 0, count: 2880 - remainder))
         }
 
-        try? data.write(to: url)
+        try data.write(to: url, options: .atomic)
     }
 
     // MARK: - JPEG
-    private static func saveJPEG(image: NSImage, to url: URL) {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        if let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.95]) {
-            try? data.write(to: url)
+    private static func saveJPEG(image: NSImage, to url: URL) throws {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ExportError(message: "JPEG用画像を取得できませんでした")
         }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.95]) else {
+            throw ExportError(message: "JPEGデータを生成できませんでした")
+        }
+        try data.write(to: url, options: .atomic)
     }
 
     // MARK: - FITS Helper

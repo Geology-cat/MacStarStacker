@@ -1,6 +1,6 @@
 import Cocoa
 
-/// 3ペイン分割を管理するメインスプリットビューコントローラ（macOS 10.12+ 互換）
+/// 3ペイン分割を管理するメインスプリットビューコントローラ（macOS 14+）
 public class MainSplitViewController: NSSplitViewController {
 
     public let fileListVC = FileListViewController()

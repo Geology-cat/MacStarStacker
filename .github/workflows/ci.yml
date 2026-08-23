@@ -1,0 +1,45 @@
+name: Swiftテスト
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: ソースを取得
+        uses: actions/checkout@v4
+
+      - name: 100 MB以上の追跡ファイルを検査
+        shell: bash
+        run: |
+          set -euo pipefail
+          oversized="$({
+            git ls-files -z |
+              xargs -0 stat -f '%z %N' |
+              awk '$1 >= 100000000'
+          } || true)"
+          if [[ -n "$oversized" ]]; then
+            echo "GitHubの上限を超える追跡ファイルがあります:"
+            echo "$oversized"
+            exit 1
+          fi
+
+      - name: OpenCVを準備
+        run: brew install opencv pkg-config
+
+      - name: 全テストを実行
+        run: swift test --package-path MacStarStacker.swiftpm

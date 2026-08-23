@@ -23,7 +23,7 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.12</string>
+    <string>14.0</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 MacStarStacker. All rights reserved.</string>
     <key>NSPrincipalClass</key>

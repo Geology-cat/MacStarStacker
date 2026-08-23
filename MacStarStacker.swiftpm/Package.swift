@@ -1,10 +1,16 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+#if arch(arm64)
+let opencvPrefix = "/opt/homebrew/opt/opencv"
+#else
+let opencvPrefix = "/usr/local/opt/opencv"
+#endif
+
 let package = Package(
     name: "MacSequator",
     platforms: [
-        .macOS(.v10_13)
+        .macOS(.v14)
     ],
     products: [
         .executable(
@@ -21,14 +27,12 @@ let package = Package(
             cxxSettings: [
                 .unsafeFlags([
                     "-std=c++17",
-                    "-I/usr/local/opt/opencv/include/opencv4",
-                    "-I/opt/homebrew/include/opencv4"
+                    "-I\(opencvPrefix)/include/opencv4"
                 ], .when(platforms: [.macOS]))
             ],
             linkerSettings: [
                 .unsafeFlags([
-                    "-L/usr/local/opt/opencv/lib",
-                    "-L/opt/homebrew/opt/opencv/lib",
+                    "-L\(opencvPrefix)/lib",
                     "-lopencv_core",
                     "-lopencv_imgproc",
                     "-lopencv_imgcodecs",
@@ -52,6 +56,11 @@ let package = Package(
             name: "OpenCVWrapperTests",
             dependencies: ["OpenCVWrapper"],
             path: "Tests/OpenCVWrapperTests"
+        ),
+        .testTarget(
+            name: "MacSequatorTests",
+            dependencies: ["MacSequator"],
+            path: "Tests/MacSequatorTests"
         )
     ]
 )

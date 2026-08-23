@@ -23,39 +23,48 @@ class CalibrationProcessor {
         let height = lightBuf.height
         let count = width * height * 4
 
-        // Step 1: Bias subtraction
-        if let bias = masterBias, let biasBuf = floatBuffer(from: bias) {
-            if biasBuf.width == width && biasBuf.height == height {
-                var result = [Float](repeating: 0, count: count)
-                vDSP_vsub(biasBuf.pixels, 1, lightBuf.pixels, 1, &result, 1, vDSP_Length(count))
-                lightBuf = FloatBuffer(pixels: result, width: width, height: height)
-            }
+        let biasBuf = masterBias.flatMap(floatBuffer)
+        let darkBuf = masterDark.flatMap(floatBuffer)
+        let flatBuf = masterFlat.flatMap(floatBuffer)
+
+        for buffer in [biasBuf, darkBuf, flatBuf].compactMap({ $0 }) {
+            guard buffer.width == width && buffer.height == height else { return nil }
         }
 
-        // Step 2: Dark subtraction (dark already contains bias, so no double-subtract)
-        if let dark = masterDark, let darkBuf = floatBuffer(from: dark) {
-            if darkBuf.width == width && darkBuf.height == height {
-                var result = [Float](repeating: 0, count: count)
-                vDSP_vsub(darkBuf.pixels, 1, lightBuf.pixels, 1, &result, 1, vDSP_Length(count))
-                lightBuf = FloatBuffer(pixels: result, width: width, height: height)
-            }
+        // Dark は通常 Bias 成分を含む。両方をそのまま引く二重減算を避ける。
+        if let darkBuf = darkBuf {
+            var result = [Float](repeating: 0, count: count)
+            vDSP_vsub(darkBuf.pixels, 1, lightBuf.pixels, 1, &result, 1, vDSP_Length(count))
+            lightBuf = FloatBuffer(pixels: result, width: width, height: height)
+        } else if let biasBuf = biasBuf {
+            var result = [Float](repeating: 0, count: count)
+            vDSP_vsub(biasBuf.pixels, 1, lightBuf.pixels, 1, &result, 1, vDSP_Length(count))
+            lightBuf = FloatBuffer(pixels: result, width: width, height: height)
         }
+        restoreOpaqueAlpha(in: &lightBuf.pixels)
 
         // Step 3: Flat-field division (normalize flat first)
-        if let flat = masterFlat, let flatBuf = floatBuffer(from: flat) {
-            if flatBuf.width == width && flatBuf.height == height {
-                // Normalise flat to have mean = 1.0 to preserve brightness
-                let mean = flatBuf.pixels.reduce(0, +) / Float(count)
-                let normalised = mean > 0 ? flatBuf.pixels.map { $0 / mean } : flatBuf.pixels
+        if let flatBuf = flatBuf {
+            var rgbSum: Float = 0
+            for i in stride(from: 0, to: count, by: 4) {
+                rgbSum += flatBuf.pixels[i] + flatBuf.pixels[i + 1] + flatBuf.pixels[i + 2]
+            }
+            let mean = rgbSum / Float(width * height * 3)
+            guard mean > 0 else { return nil }
 
-                var result = [Float](repeating: 0, count: count)
-                vDSP_vdiv(normalised, 1, lightBuf.pixels, 1, &result, 1, vDSP_Length(count))
-                // Clamp result to [0, 1]
-                var lo: Float = 0, hi: Float = 1
-                vDSP_vclip(result, 1, &lo, &hi, &result, 1, vDSP_Length(count))
-                lightBuf = FloatBuffer(pixels: result, width: width, height: height)
+            for i in stride(from: 0, to: count, by: 4) {
+                for channel in 0..<3 {
+                    let normalizedFlat = flatBuf.pixels[i + channel] / mean
+                    guard normalizedFlat > 0.000_001 else { continue }
+                    lightBuf.pixels[i + channel] /= normalizedFlat
+                }
+                lightBuf.pixels[i + 3] = 1.0
             }
         }
+
+        var lo: Float = 0, hi: Float = 1
+        vDSP_vclip(lightBuf.pixels, 1, &lo, &hi, &lightBuf.pixels, 1, vDSP_Length(count))
+        restoreOpaqueAlpha(in: &lightBuf.pixels)
 
         // Convert back to NSImage
         return nsImage(from: lightBuf.pixels, width: width, height: height)
@@ -70,7 +79,7 @@ class CalibrationProcessor {
     // MARK: - Private Helpers
 
     struct FloatBuffer {
-        let pixels: [Float]
+        var pixels: [Float]
         let width: Int
         let height: Int
     }
@@ -79,31 +88,49 @@ class CalibrationProcessor {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let width = cgImage.width
         let height = cgImage.height
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        let floatPixels = pixels.map { Float($0) / 255.0 }
-        return FloatBuffer(pixels: floatPixels, width: width, height: height)
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let baseAddress = bytes.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 32,
+                    bytesPerRow: width * 16,
+                    space: colorSpace,
+                    bitmapInfo: CGBitmapInfo.floatComponents.rawValue
+                        | CGBitmapInfo.byteOrder32Little.rawValue
+                        | CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+        return FloatBuffer(pixels: pixels, width: width, height: height)
+    }
+
+    private static func restoreOpaqueAlpha(in pixels: inout [Float]) {
+        for index in stride(from: 3, to: pixels.count, by: 4) {
+            pixels[index] = 1.0
+        }
     }
 
     private static func nsImage(from pixels: [Float], width: Int, height: Int) -> NSImage? {
-        let uint8Pixels = pixels.map { UInt8(max(0, min(255, $0 * 255.0))) }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let provider = CGDataProvider(data: Data(uint8Pixels) as CFData),
+        let uint16Pixels = pixels.map { value -> UInt16 in
+            guard value.isFinite else { return 0 }
+            return UInt16(max(0, min(65_535, value * 65_535.0)).rounded())
+        }
+        let data = uint16Pixels.withUnsafeBytes { Data($0) }
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
                   width: width, height: height,
-                  bitsPerComponent: 8, bitsPerPixel: 32,
-                  bytesPerRow: width * 4, space: colorSpace,
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  bitsPerComponent: 16, bitsPerPixel: 64,
+                  bytesPerRow: width * 8, space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(rawValue:
+                    CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+                  ),
                   provider: provider, decode: nil,
                   shouldInterpolate: false, intent: .defaultIntent
               ) else { return nil }

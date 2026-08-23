@@ -1,6 +1,6 @@
 import Cocoa
 
-/// 中央の画像プレビューおよびマスクブラシ描画を行うカスタムNSView（macOS 10.12+ 互換）
+/// 中央の画像プレビューおよびマスクブラシ描画を行うカスタムNSView（macOS 14+）
 public class MaskCanvasView: NSView {
 
     // ── 表示・描画状態 ──
@@ -25,6 +25,26 @@ public class MaskCanvasView: NSView {
         }
     }
 
+    /// OFF の間はマスク用フル解像度バッファもマウス追跡描画も行わない。
+    public var isMaskEditingEnabled: Bool = false {
+        didSet {
+            guard oldValue != isMaskEditingEnabled else { return }
+            isDragging = false
+            lastImagePt = nil
+            hoverViewPt = nil
+            if isMaskEditingEnabled {
+                updateImageContext()
+                synchronizeMask(from: StackingStateController.shared.maskBitmap)
+            } else {
+                maskCtx = nil
+                overlayCGImage = nil
+                synchronizedMaskIdentifier = nil
+                NSCursor.arrow.set()
+            }
+            needsDisplay = true
+        }
+    }
+
     // マスクコンテキスト（元画像のピクセル解像度）
     private var maskCtx: CGContext? = nil
     private var overlayCGImage: CGImage? = nil
@@ -33,9 +53,11 @@ public class MaskCanvasView: NSView {
     private var isDragging: Bool = false
     private var isSpacePressed: Bool = false
     private var lastDragPoint: CGPoint = .zero
+    private var synchronizedMaskIdentifier: ObjectIdentifier? = nil
 
     private var imagePixelWidth: Int = 0
     private var imagePixelHeight: Int = 0
+    var hasAllocatedMaskBuffer: Bool { maskCtx != nil }
 
     override public var isFlipped: Bool { true }
     override public var acceptsFirstResponder: Bool { true }
@@ -75,10 +97,20 @@ public class MaskCanvasView: NSView {
         let W = cg.width
         let H = cg.height
 
-        if W != imagePixelWidth || H != imagePixelHeight || maskCtx == nil {
-            imagePixelWidth = W
-            imagePixelHeight = H
+        let dimensionsChanged = W != imagePixelWidth || H != imagePixelHeight
+        imagePixelWidth = W
+        imagePixelHeight = H
 
+        guard isMaskEditingEnabled else {
+            if dimensionsChanged {
+                maskCtx = nil
+                overlayCGImage = nil
+                synchronizedMaskIdentifier = nil
+            }
+            return
+        }
+
+        if dimensionsChanged || maskCtx == nil {
             let cs = CGColorSpaceCreateDeviceRGB()
             let ctx = CGContext(
                 data: nil,
@@ -91,22 +123,34 @@ public class MaskCanvasView: NSView {
             )
             ctx?.clear(CGRect(x: 0, y: 0, width: W, height: H))
             maskCtx = ctx
-
-            // 既存のマスクビットマップがあれば読み込む
-            if let existingMask = StackingStateController.shared.maskBitmap,
-               let existingCG = existingMask.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                ctx?.draw(existingCG, in: CGRect(x: 0, y: 0, width: W, height: H))
-            }
-
+            synchronizedMaskIdentifier = nil
+            synchronizeMask(from: StackingStateController.shared.maskBitmap)
             updateOverlayImage()
         }
+    }
+
+    /// 外部の「マスクをクリア」とキャンバス内のバッファを同期する。
+    public func synchronizeMask(from mask: NSImage?) {
+        guard isMaskEditingEnabled, let ctx = maskCtx else { return }
+        let identifier = mask.map(ObjectIdentifier.init)
+        guard identifier != synchronizedMaskIdentifier else { return }
+
+        ctx.clear(CGRect(x: 0, y: 0, width: imagePixelWidth, height: imagePixelHeight))
+        if let mask = mask,
+           let cg = mask.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: imagePixelWidth, height: imagePixelHeight))
+        }
+        synchronizedMaskIdentifier = identifier
+        updateOverlayImage()
+        needsDisplay = true
     }
 
     public func clearMask() {
         if let ctx = maskCtx {
             ctx.clear(CGRect(x: 0, y: 0, width: imagePixelWidth, height: imagePixelHeight))
             updateOverlayImage()
-            exportMaskBitmap()
+            synchronizedMaskIdentifier = nil
+            StackingStateController.shared.maskBitmap = nil
             needsDisplay = true
         }
     }
@@ -115,9 +159,10 @@ public class MaskCanvasView: NSView {
         overlayCGImage = maskCtx?.makeImage()
     }
 
-    private func exportMaskBitmap() {
+    func exportMaskBitmap() {
         guard let cg = maskCtx?.makeImage() else { return }
         let nsImg = NSImage(cgImage: cg, size: NSSize(width: imagePixelWidth, height: imagePixelHeight))
+        synchronizedMaskIdentifier = ObjectIdentifier(nsImg)
         StackingStateController.shared.maskBitmap = nsImg
     }
 
@@ -149,7 +194,7 @@ public class MaskCanvasView: NSView {
         return CGRect(x: originX, y: originY, width: scaledW, height: scaledH)
     }
 
-    private func viewToImagePoint(_ viewPt: CGPoint) -> CGPoint? {
+    func viewToImagePoint(_ viewPt: CGPoint) -> CGPoint? {
         let rect = imageDrawRect()
         guard rect.width > 0 && rect.height > 0 else { return nil }
 
@@ -191,8 +236,7 @@ public class MaskCanvasView: NSView {
         ctx.restoreGState()
 
         // 2. マスクオーバーレイ描画
-        if StackingStateController.shared.compositingMode == "SkyGround",
-           let overlay = overlayCGImage {
+        if isMaskEditingEnabled, let overlay = overlayCGImage {
             ctx.saveGState()
             ctx.setAlpha(0.5) // 半透明オーバーレイ
             ctx.translateBy(x: drawRect.origin.x, y: drawRect.origin.y + drawRect.height)
@@ -202,8 +246,7 @@ public class MaskCanvasView: NSView {
         }
 
         // 3. ブラシカーソルリング描画
-        if StackingStateController.shared.compositingMode == "SkyGround",
-           let hoverPt = hoverViewPt,
+        if isMaskEditingEnabled, let hoverPt = hoverViewPt,
            !isSpacePressed {
             let brushSize = StackingStateController.shared.brushSize
             let ringRect = CGRect(
@@ -269,6 +312,7 @@ public class MaskCanvasView: NSView {
     }
 
     override public func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let viewPt = convert(event.locationInWindow, from: nil)
         lastDragPoint = viewPt
 
@@ -278,7 +322,7 @@ public class MaskCanvasView: NSView {
         }
 
         // マスク描画モードの場合
-        if StackingStateController.shared.compositingMode == "SkyGround" {
+        if isMaskEditingEnabled {
             if let imgPt = viewToImagePoint(viewPt) {
                 isDragging = true
                 paint(at: imgPt, from: imgPt)
@@ -298,18 +342,21 @@ public class MaskCanvasView: NSView {
             return
         }
 
-        if isDragging, StackingStateController.shared.compositingMode == "SkyGround" {
+        if isDragging, isMaskEditingEnabled {
             if let imgPt = viewToImagePoint(viewPt) {
                 paint(at: imgPt, from: lastImagePt ?? imgPt)
                 lastImagePt = imgPt
             }
         }
 
-        hoverViewPt = viewPt
-        needsDisplay = true
+        if isMaskEditingEnabled {
+            hoverViewPt = viewPt
+            needsDisplay = true
+        }
     }
 
     override public func mouseUp(with event: NSEvent) {
+        let completedMaskStroke = isDragging && isMaskEditingEnabled
         isDragging = false
         lastImagePt = nil
         if isSpacePressed {
@@ -317,13 +364,26 @@ public class MaskCanvasView: NSView {
         } else {
             NSCursor.arrow.set()
         }
-        exportMaskBitmap()
+        if completedMaskStroke { exportMaskBitmap() }
         needsDisplay = true
     }
 
     override public func mouseMoved(with event: NSEvent) {
+        guard isMaskEditingEnabled else { return }
         hoverViewPt = convert(event.locationInWindow, from: nil)
         needsDisplay = true
+    }
+
+    override public func mouseExited(with event: NSEvent) {
+        guard isMaskEditingEnabled else { return }
+        hoverViewPt = nil
+        needsDisplay = true
+    }
+
+    override public func cursorUpdate(with event: NSEvent) {
+        if isSpacePressed { NSCursor.openHand.set() }
+        else if isMaskEditingEnabled { NSCursor.crosshair.set() }
+        else { NSCursor.arrow.set() }
     }
 
     override public func scrollWheel(with event: NSEvent) {
@@ -340,7 +400,7 @@ public class MaskCanvasView: NSView {
 
     // MARK: - ペイントロジック
 
-    private func paint(at currentPt: CGPoint, from previousPt: CGPoint) {
+    func paint(at currentPt: CGPoint, from previousPt: CGPoint) {
         guard let ctx = maskCtx else { return }
 
         let rect = imageDrawRect()
@@ -365,9 +425,20 @@ public class MaskCanvasView: NSView {
             ctx.setBlendMode(.clear)
         }
 
+        // MaskCanvasViewは上原点、ビットマップCGContextは下原点なのでY軸を変換する。
+        // ここを変換しないと、ポインタ位置の上下反対へマスクが描かれる。
+        let contextCurrentPt = CGPoint(
+            x: currentPt.x,
+            y: CGFloat(imagePixelHeight) - currentPt.y
+        )
+        let contextPreviousPt = CGPoint(
+            x: previousPt.x,
+            y: CGFloat(imagePixelHeight) - previousPt.y
+        )
+
         ctx.beginPath()
-        ctx.move(to: previousPt)
-        ctx.addLine(to: currentPt)
+        ctx.move(to: contextPreviousPt)
+        ctx.addLine(to: contextCurrentPt)
         ctx.strokePath()
         ctx.restoreGState()
 

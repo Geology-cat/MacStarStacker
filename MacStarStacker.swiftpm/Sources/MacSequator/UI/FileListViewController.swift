@@ -1,6 +1,6 @@
 import Cocoa
 
-/// 左ペインのファイル一覧・管理ビューコントローラ（macOS 10.12+ 互換）
+/// 左ペインのファイル一覧・管理ビューコントローラ（macOS 14+）
 public class FileListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
 
     private let segmentedTypePicker = NSSegmentedControl()
@@ -13,9 +13,15 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     private let baseInfoLabel = NSTextField(labelWithString: "")
 
     private var currentType: ImageType = .light
+    private var stateChangeObserver: NSObjectProtocol?
 
     override public func loadView() {
-        self.view = NSView()
+        let dropView = ImageDropView()
+        dropView.onImageURLsDropped = { [weak self] urls in
+            guard let self = self else { return }
+            StackingStateController.shared.add(urls: urls, to: self.currentType)
+        }
+        self.view = dropView
         self.view.wantsLayer = true
         self.view.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1.0).cgColor
 
@@ -25,15 +31,21 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     override public func viewDidLoad() {
         super.viewDidLoad()
 
-        // ドラッグ＆ドロップ登録
-        view.registerForDraggedTypes([.fileURL])
-        tableView.registerForDraggedTypes([.fileURL])
-
-        StackingStateController.shared.onStateChanged = { [weak self] in
+        stateChangeObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidChange,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
             self?.updateUI()
         }
 
         updateUI()
+    }
+
+    deinit {
+        if let observer = stateChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func setupUI() {
@@ -215,15 +227,7 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     @objc private func onAddClicked() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowedFileTypes = [
-            "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2", "dng", "pef",
-            "tif", "tiff", "fit", "fits", "jpg", "jpeg", "png"
-        ]
-        panel.title = "\(currentType.rawValue)画像を選択"
+        let panel = ImageImportSupport.makeOpenPanel(title: "\(currentType.rawValue)画像を選択")
         panel.begin { [weak self] response in
             guard response == .OK, let self = self else { return }
             StackingStateController.shared.add(urls: panel.urls, to: self.currentType)
@@ -234,23 +238,6 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         StackingStateController.shared.clear(type: currentType)
     }
 
-    // MARK: - ドラッグ＆ドロップ
-
-    public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        return .copy
-    }
-
-    public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let items = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
-            return false
-        }
-        let fileURLs = items.filter { $0.isFileURL }
-        if !fileURLs.isEmpty {
-            StackingStateController.shared.add(urls: fileURLs, to: currentType)
-            return true
-        }
-        return false
-    }
 }
 
 // MARK: - カスタムセルビュー

@@ -13,9 +13,14 @@ DerivedData/
 
 # Distribution build output
 /dist/*
-!/dist/*.dmg
 *.app
 *.zip
+
+# 配布物はGitHub Releasesへ添付し、Git履歴には含めない
+*.dmg
+
+# 実写の大容量統合テスト素材（ローカル専用）
+/test_materials/
 
 # Temporary files
 /tmp/

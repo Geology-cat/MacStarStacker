@@ -24,7 +24,7 @@
           [NSError errorWithDomain:@"ImageAlignerDomain"
                               code:1
                           userInfo:@{
-                            NSLocalizedDescriptionKey : @"Could not load images"
+                            NSLocalizedDescriptionKey : @"画像を読み込めませんでした"
                           }];
     }
     return nil;
@@ -52,7 +52,7 @@
             [NSError errorWithDomain:@"ImageAlignerDomain"
                                 code:2
                             userInfo:@{
-                              NSLocalizedDescriptionKey : @"No features found"
+                                NSLocalizedDescriptionKey : @"位置合わせに必要な特徴点が見つかりませんでした"
                             }];
       }
       return nil;
@@ -70,7 +70,7 @@
           errorWithDomain:@"ImageAlignerDomain"
                      code:3
                  userInfo:@{
-                   NSLocalizedDescriptionKey : @"Too few feature matches"
+                   NSLocalizedDescriptionKey : @"一致する特徴点が不足しています"
                  }];
     }
     return nil;
@@ -91,11 +91,12 @@
   // --- Homography with USAC_MAGSAC (more robust than basic RANSAC) ---
   // Falls back to standard RANSAC if USAC not available.
   cv::Mat homography;
+  cv::Mat inlierMask;
   try {
     homography = cv::findHomography(pts1, pts2, cv::USAC_MAGSAC, 3.0,
-                                    cv::noArray(), 5000, 0.999);
+                                    inlierMask, 5000, 0.999);
   } catch (...) {
-    homography = cv::findHomography(pts1, pts2, cv::RANSAC, 3.0, cv::noArray(),
+    homography = cv::findHomography(pts1, pts2, cv::RANSAC, 3.0, inlierMask,
                                     5000, 0.999);
   }
 
@@ -105,7 +106,21 @@
           errorWithDomain:@"ImageAlignerDomain"
                      code:4
                  userInfo:@{
-                   NSLocalizedDescriptionKey : @"Failed to compute homography"
+                   NSLocalizedDescriptionKey : @"画像間の変換を計算できませんでした"
+                 }];
+    }
+    return nil;
+  }
+
+  const int inlierCount = inlierMask.empty() ? 0 : cv::countNonZero(inlierMask);
+  const double inlierRatio = matches.empty() ? 0.0 : (double)inlierCount / (double)matches.size();
+  if (inlierCount < 8 || inlierRatio < 0.25) {
+    if (error) {
+      *error = [NSError
+          errorWithDomain:@"ImageAlignerDomain"
+                     code:5
+                 userInfo:@{
+                   NSLocalizedDescriptionKey : @"位置合わせの信頼度が不足しています"
                  }];
     }
     return nil;
@@ -113,7 +128,36 @@
 
   // --- Warp original color image using the computed homography ---
   cv::Mat im_target_color =
-      cv::imread(targetURL.path.UTF8String, cv::IMREAD_COLOR);
+      cv::imread(targetURL.path.UTF8String, cv::IMREAD_UNCHANGED);
+  if (im_target_color.empty()) {
+    if (error) {
+      *error = [NSError
+          errorWithDomain:@"ImageAlignerDomain"
+                     code:6
+                 userInfo:@{
+                   NSLocalizedDescriptionKey : @"カラー画像を読み込めませんでした"
+                 }];
+    }
+    return nil;
+  }
+  if (im_target_color.depth() != CV_8U && im_target_color.depth() != CV_16U) {
+    im_target_color.convertTo(im_target_color, CV_16U, 65535.0);
+  }
+  if (im_target_color.channels() == 4) {
+    cv::cvtColor(im_target_color, im_target_color, cv::COLOR_BGRA2BGR);
+  } else if (im_target_color.channels() == 1) {
+    cv::cvtColor(im_target_color, im_target_color, cv::COLOR_GRAY2BGR);
+  } else if (im_target_color.channels() != 3) {
+    if (error) {
+      *error = [NSError
+          errorWithDomain:@"ImageAlignerDomain"
+                     code:7
+                 userInfo:@{
+                   NSLocalizedDescriptionKey : @"未対応の画像チャンネル形式です"
+                 }];
+    }
+    return nil;
+  }
   cv::Mat im_aligned;
   cv::warpPerspective(im_target_color, im_aligned, homography,
                       cv::Size(im_base_gray.cols, im_base_gray.rows),
@@ -129,8 +173,12 @@
 
 // ── Helper: cv::Mat → NSImage ──────────────────────────────────────────
 + (NSImage *)NSImageFromMat:(cv::Mat)cvMat {
+  if (cvMat.empty() || (cvMat.depth() != CV_8U && cvMat.depth() != CV_16U)) {
+    return nil;
+  }
+  if (!cvMat.isContinuous()) cvMat = cvMat.clone();
   NSData *data = [NSData dataWithBytes:cvMat.data
-                                length:cvMat.elemSize() * cvMat.total()];
+                                length:cvMat.step[0] * cvMat.rows];
 
   CGColorSpaceRef colorSpace = (cvMat.elemSize() == 1)
                                    ? CGColorSpaceCreateDeviceGray()
@@ -139,10 +187,21 @@
   CGDataProviderRef provider =
       CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
 
+  const size_t bitsPerComponent = cvMat.depth() == CV_16U ? 16 : 8;
+  const CGBitmapInfo bitmapInfo = cvMat.depth() == CV_16U
+      ? (kCGImageAlphaNone | kCGBitmapByteOrder16Little)
+      : (kCGImageAlphaNone | kCGBitmapByteOrderDefault);
   CGImageRef imageRef = CGImageCreate(
-      cvMat.cols, cvMat.rows, 8, 8 * cvMat.elemSize(), cvMat.step[0],
-      colorSpace, kCGImageAlphaNone | kCGBitmapByteOrderDefault, provider, NULL,
+      cvMat.cols, cvMat.rows, bitsPerComponent,
+      bitsPerComponent * cvMat.channels(), cvMat.step[0],
+      colorSpace, bitmapInfo, provider, NULL,
       false, kCGRenderingIntentDefault);
+
+  if (!imageRef) {
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(colorSpace);
+    return nil;
+  }
 
   NSImage *image =
       [[NSImage alloc] initWithCGImage:imageRef

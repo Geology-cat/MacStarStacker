@@ -1,7 +1,7 @@
 #!/bin/bash
 # build_app.sh — MacStarStacker .app & .dmg builder
 # Output: dist/MacStarStacker.app, dist/MacStarStacker.dmg
-set -e
+set -euo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$PROJ_DIR/../dist"
@@ -16,6 +16,7 @@ BIN_SRC="$BUILD_DIR/$BIN_NAME"
 BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
 INFO_PLIST="$PROJ_DIR/Sources/MacSequator/Info.plist"
 ICNS_SRC="$PROJ_DIR/Sources/MacSequator/AppIcon.icns"
+BUILD_ARCH="$(uname -m)"
 
 echo "=== Building release binary ==="
 cd "$PROJ_DIR"
@@ -45,99 +46,125 @@ if [ -f "$ICNS_SRC" ]; then
     echo "Icon: AppIcon.icns copied"
 fi
 
-# 5. Copy required OpenCV dylibs and fix rpaths
+# 5. Homebrew/OpenCV の非システム依存ライブラリを再帰的に同梱
 OPENCV_LIB_DIR="$(pkg-config --variable=libdir opencv4 2>/dev/null || echo '/usr/local/opt/opencv/lib')"
-echo "=== Copying required OpenCV dylibs from $OPENCV_LIB_DIR ==="
+BREW_PREFIX="$(brew --prefix 2>/dev/null || dirname "$(dirname "$OPENCV_LIB_DIR")")"
+echo "=== Bundling non-system dylibs from $BREW_PREFIX ==="
 
 REQUIRED_MODULES=("core" "imgproc" "imgcodecs" "features2d" "calib3d" "flann" "photo")
 
 for MOD in "${REQUIRED_MODULES[@]}"; do
-    for DYLIB in "$OPENCV_LIB_DIR"/libopencv_${MOD}*.dylib; do
-        [ -f "$DYLIB" ] || continue
-        BASENAME="$(basename "$DYLIB")"
-        cp -L "$DYLIB" "$CONTENTS/Frameworks/$BASENAME"
-        chmod 755 "$CONTENTS/Frameworks/$BASENAME"
-
-        # Update reference in main binary
-        install_name_tool -change "$DYLIB" \
-            "@executable_path/../Frameworks/$BASENAME" \
-            "$CONTENTS/MacOS/$APP_NAME" 2>/dev/null || true
-
-        # Update the dylib's own id
-        install_name_tool -id \
-            "@loader_path/$BASENAME" \
-            "$CONTENTS/Frameworks/$BASENAME" 2>/dev/null || true
-    done
+    DYLIB="$(find "$OPENCV_LIB_DIR" -maxdepth 1 -name "libopencv_${MOD}.*.dylib" -print | sort | tail -1)"
+    if [ -z "$DYLIB" ]; then
+        echo "ERROR: OpenCV module not found: $MOD" >&2
+        exit 1
+    fi
+    cp -L "$DYLIB" "$CONTENTS/Frameworks/$(basename "$DYLIB")"
 done
 
-# Fix inter-dylib dependencies inside Frameworks
-for DYLIB_FILE in "$CONTENTS/Frameworks"/libopencv_*.dylib; do
-    [ -f "$DYLIB_FILE" ] || continue
-    for MOD in "${REQUIRED_MODULES[@]}"; do
-        for DEP in "$OPENCV_LIB_DIR"/libopencv_${MOD}*.dylib; do
-            [ -f "$DEP" ] || continue
-            DEP_BASENAME="$(basename "$DEP")"
-            install_name_tool -change "$DEP" \
-                "@loader_path/$DEP_BASENAME" \
-                "$DYLIB_FILE" 2>/dev/null || true
-        done
+BREW_DYLIB_INDEX="$PROJ_DIR/.build/brew_dylib_index.txt"
+find -L "$BREW_PREFIX/opt" -type f -name '*.dylib' -print > "$BREW_DYLIB_INDEX"
+
+resolve_dependency() {
+    local dep="$1"
+    local basename_dep
+    basename_dep="$(basename "$dep")"
+
+    if [[ "$dep" == /* ]] && [ -f "$dep" ]; then
+        printf '%s\n' "$dep"
+        return 0
+    fi
+    if [[ "$dep" == @rpath/* ]]; then
+        # 事前作成した索引を使い、間接依存ごとのHomebrew全探索を避ける。
+        awk -v suffix="/lib/$basename_dep" 'index($0, suffix) == length($0) - length(suffix) + 1 { print; exit }' "$BREW_DYLIB_INDEX"
+        return 0
+    fi
+    return 1
+}
+
+# 新しい依存が見つからなくなるまで、コピーと参照書き換えを繰り返す。
+while :; do
+    BEFORE_COUNT="$(find "$CONTENTS/Frameworks" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+    TARGETS=("$CONTENTS/MacOS/$APP_NAME")
+    while IFS= read -r FRAMEWORK_DYLIB; do
+        TARGETS+=("$FRAMEWORK_DYLIB")
+    done < <(find "$CONTENTS/Frameworks" -maxdepth 1 -type f -name '*.dylib' -print | sort)
+
+    for TARGET in "${TARGETS[@]}"; do
+        while IFS= read -r DEP; do
+            case "$DEP" in
+                /System/*|/usr/lib/*) continue ;;
+            esac
+
+            SRC="$(resolve_dependency "$DEP" || true)"
+            [ -n "$SRC" ] || continue
+            DEP_BASENAME="$(basename "$SRC")"
+            DEST="$CONTENTS/Frameworks/$DEP_BASENAME"
+            if [ ! -f "$DEST" ]; then
+                cp -L "$SRC" "$DEST"
+                chmod 755 "$DEST"
+            fi
+
+            if [ "$TARGET" = "$CONTENTS/MacOS/$APP_NAME" ]; then
+                NEW_DEP="@executable_path/../Frameworks/$DEP_BASENAME"
+            else
+                NEW_DEP="@loader_path/$DEP_BASENAME"
+            fi
+            install_name_tool -change "$DEP" "$NEW_DEP" "$TARGET"
+        done < <(otool -L "$TARGET" | tail -n +2 | awk '{print $1}')
     done
+
+    AFTER_COUNT="$(find "$CONTENTS/Frameworks" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+    [ "$BEFORE_COUNT" = "$AFTER_COUNT" ] && break
 done
 
-# Add rpath
+for DYLIB_FILE in "$CONTENTS/Frameworks"/*.dylib; do
+    install_name_tool -id "@rpath/$(basename "$DYLIB_FILE")" "$DYLIB_FILE"
+done
+
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$CONTENTS/MacOS/$APP_NAME" 2>/dev/null || true
 
-# Copy Swift compatibility libraries for older macOS if needed (macOS 10.12-10.14)
-SWIFT_LIB_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx"
-if [ -d "$SWIFT_LIB_DIR" ]; then
-    echo "=== Copying Swift compatibility libraries for macOS 10.12-10.14 ==="
-    cp "$SWIFT_LIB_DIR"/libswift*.dylib "$CONTENTS/Frameworks/" 2>/dev/null || true
+UNBUNDLED="$(
+    find "$CONTENTS/MacOS" "$CONTENTS/Frameworks" -type f -perm -111 -print0 |
+    while IFS= read -r -d '' TARGET; do
+        otool -L "$TARGET" 2>/dev/null | tail -n +2 | awk '{print $1}'
+    done | grep -E '^(/usr/local|/opt/homebrew)/' || true
+)"
+if [ -n "$UNBUNDLED" ]; then
+    echo "ERROR: Unbundled libraries remain:" >&2
+    echo "$UNBUNDLED" >&2
+    exit 1
 fi
 
-# 6. Remove quarantine attribute (allows double-click to open)
-xattr -cr "$APP_DIR" 2>/dev/null || true
+UNRESOLVED_RPATH="$(
+    find "$CONTENTS/MacOS" "$CONTENTS/Frameworks" -type f -perm -111 -print0 |
+    while IFS= read -r -d '' TARGET; do
+        TARGET_BASENAME="$(basename "$TARGET")"
+        while IFS= read -r DEP; do
+            [[ "$DEP" == @rpath/* ]] || continue
+            DEP_BASENAME="$(basename "$DEP")"
+            # dylib自身のLC_ID_DYLIBと、OSが供給するSwiftランタイムは除外する。
+            [ "$DEP_BASENAME" = "$TARGET_BASENAME" ] && continue
+            [ -f "$CONTENTS/Frameworks/$DEP_BASENAME" ] && continue
+            [ -f "/usr/lib/swift/$DEP_BASENAME" ] && continue
+            printf '%s -> %s\n' "$TARGET_BASENAME" "$DEP"
+        done < <(otool -L "$TARGET" 2>/dev/null | tail -n +2 | awk '{print $1}')
+    done
+)"
+if [ -n "$UNRESOLVED_RPATH" ]; then
+    echo "ERROR: Unresolved @rpath libraries remain:" >&2
+    echo "$UNRESOLVED_RPATH" >&2
+    exit 1
+fi
 
-# 7. Build Gatekeeper Unlock AppleScript Application
-echo "=== Building Gatekeeper Unlock AppleScript App ==="
-GATEKEEPER_APP="$DMG_STAGING/初回起動（Gatekeeper解除）.app"
+# 6. 隔離属性を除去し、アドホック署名を付与
+xattr -cr "$APP_DIR" 2>/dev/null || true
+codesign --force --deep --sign - "$APP_DIR"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+
+# 7. DMG staging area
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
-
-# AppleScript source code
-APPLESCRIPT_SRC="$PROJ_DIR/.build/unlock_gatekeeper.applescript"
-cat << 'EOF' > "$APPLESCRIPT_SRC"
-tell application "Finder"
-	set currentFolder to POSIX path of ((container of (path to me)) as text)
-	set localApp to currentFolder & "MacStarStacker.app"
-	set installedApp to "/Applications/MacStarStacker.app"
-end tell
-
-try
-	do shell script "xattr -dr com.apple.quarantine " & quoted form of localApp & " 2>/dev/null || true"
-	do shell script "xattr -dr com.apple.quarantine " & quoted form of installedApp & " 2>/dev/null || true"
-	
-	set res to display dialog "Gatekeeperのセキュリティ制限（未確認の開発元警告）を解除しました。" & return & return & "MacStarStacker を起動しますか？" buttons {"キャンセル", "起動する"} default button "起動する" with title "MacStarStacker 初回起動アシスタント" with icon note
-	
-	if button returned of res is "起動する" then
-		try
-			do shell script "open " & quoted form of installedApp
-		on error
-			do shell script "open " & quoted form of localApp
-		end try
-	end if
-on error errMsg
-	display alert "エラーが発生しました" message errMsg as critical
-end try
-EOF
-
-osacompile -o "$GATEKEEPER_APP" "$APPLESCRIPT_SRC"
-
-# Copy AppIcon to Gatekeeper unlock app if available
-if [ -f "$ICNS_SRC" ]; then
-    cp "$ICNS_SRC" "$GATEKEEPER_APP/Contents/Resources/applet.icns"
-fi
-
-# 8. Assemble DMG Staging Area
 echo "=== Preparing DMG Contents ==="
 # Copy .app to staging
 cp -R "$APP_DIR" "$DMG_STAGING/"
@@ -146,32 +173,28 @@ cp -R "$APP_DIR" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 # Create README note for DMG
-cat << 'EOF' > "$DMG_STAGING/はじめにお読みください.txt"
+cat << EOF > "$DMG_STAGING/はじめにお読みください.txt"
 MacStarStacker インストール＆初回起動ガイド
 =============================================
 
 【インストール方法】
 1. 「MacStarStacker.app」を「Applications」フォルダへドラッグ＆ドロップしてください。
 
-【初回起動時の注意（Gatekeeper警告が出る場合）】
-macOSのセキュリティ機能により「開発元が未確認のため開けません」と表示された場合は、
-同梱の「初回起動（Gatekeeper解除）.app」をダブルクリックして実行してください。
-セキュリティ制限が解除され、正常に起動できるようになります。
+【初回起動時の注意】
+本ビルドはAppleのDeveloper IDでは署名・公証されていません。
+警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
 
-または、以下のいずれかの方法でも起動可能です：
-・「MacStarStacker.app」を右クリック（二本指タップ）し、メニューから「開く」を選択する。
-・「システム設定（システム環境設定）」>「プライバシーとセキュリティ」から「このまま開く」をクリックする。
-
-対応OS: macOS 10.12 (Sierra) 〜 macOS 15+ (Sequoia)
+対応OS: macOS 14 (Sonoma) 以降
+収録アーキテクチャ: ${BUILD_ARCH}（Universalバイナリではありません）
 EOF
 
-# 9. Create DMG package
+# 8. Create DMG package
 echo "=== Packaging DMG image in dist/ ==="
 rm -f "$DMG_PATH"
 hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" > /dev/null
 
 # Clean staging
-rm -rf "$DMG_STAGING" "$APPLESCRIPT_SRC"
+rm -rf "$DMG_STAGING"
 
 echo ""
 echo "=== Done! ==="

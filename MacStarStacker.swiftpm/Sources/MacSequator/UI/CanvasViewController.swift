@@ -1,6 +1,6 @@
 import Cocoa
 
-/// 中央ペインのビューコントローラ（プレビュー・マスク描画・ズーム・プログレス）（macOS 10.12+ 互換）
+/// 中央ペインのビューコントローラ（プレビュー・マスク描画・ズーム・プログレス）（macOS 14+）
 public class CanvasViewController: NSViewController {
 
     public let canvasView = MaskCanvasView()
@@ -19,9 +19,17 @@ public class CanvasViewController: NSViewController {
     private let bottomContainer = NSView()
     private let progressIndicator = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
+    private var stateChangeObserver: NSObjectProtocol?
+    private var cachedPreviewFileID: UUID?
+    private var cachedPreviewAutoStretch: Bool?
+    private var cachedPreviewImage: NSImage?
 
     override public func loadView() {
-        self.view = NSView()
+        let dropView = ImageDropView()
+        dropView.onImageURLsDropped = { urls in
+            StackingStateController.shared.add(urls: urls, to: .light)
+        }
+        self.view = dropView
         self.view.wantsLayer = true
         self.view.layer?.backgroundColor = NSColor(calibratedWhite: 0.1, alpha: 1.0).cgColor
 
@@ -32,14 +40,21 @@ public class CanvasViewController: NSViewController {
         super.viewDidLoad()
 
         // 状態監視
-        StackingStateController.shared.onStateChanged = { [weak self] in
+        stateChangeObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidChange,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
             self?.updateState()
         }
 
-        // ファイルドロップ対応
-        view.registerForDraggedTypes([.fileURL])
-
         updateState()
+    }
+
+    deinit {
+        if let observer = stateChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func setupUI() {
@@ -176,6 +191,7 @@ public class CanvasViewController: NSViewController {
 
     public func updateState() {
         let state = StackingStateController.shared
+        autoStretchCheckbox.state = state.enableAutoStretch ? .on : .off
 
         // プレビュー表示する画像の決定
         let displayImg: NSImage?
@@ -184,11 +200,11 @@ public class CanvasViewController: NSViewController {
             fileNameLabel.stringValue = "スタック結果"
             fileNameLabel.textColor = .systemGreen
         } else if let preview = state.previewImage {
-            displayImg = state.loadNSImage(from: preview)
+            displayImg = previewImage(for: preview, autoStretch: state.enableAutoStretch)
             fileNameLabel.stringValue = preview.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else if let base = state.baseImage {
-            displayImg = state.loadNSImage(from: base)
+            displayImg = previewImage(for: base, autoStretch: state.enableAutoStretch)
             fileNameLabel.stringValue = base.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else {
@@ -197,6 +213,9 @@ public class CanvasViewController: NSViewController {
         }
 
         canvasView.currentImage = displayImg
+        canvasView.isMaskEditingEnabled = state.enableSkyGroundMask
+            && !state.showResult && !state.isStacking && displayImg != nil
+        canvasView.synchronizeMask(from: state.maskBitmap)
 
         // スタック結果トグルボタンの表示
         if state.stackedResult != nil {
@@ -216,6 +235,15 @@ public class CanvasViewController: NSViewController {
         }
 
         zoomLabel.stringValue = "\(Int(round(canvasView.zoomScale * 100)))%"
+    }
+
+    private func previewImage(for file: ImageFile, autoStretch: Bool) -> NSImage? {
+        if cachedPreviewFileID != file.id || cachedPreviewAutoStretch != autoStretch {
+            cachedPreviewFileID = file.id
+            cachedPreviewAutoStretch = autoStretch
+            cachedPreviewImage = StackingStateController.shared.loadNSImage(from: file)
+        }
+        return cachedPreviewImage
     }
 
     // MARK: - アクション

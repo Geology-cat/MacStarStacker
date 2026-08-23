@@ -1,6 +1,6 @@
 import Cocoa
 
-/// 上から下にスクロール・レイアウトするための反転ビュー（macOS 10.12+ 互換）
+/// 上から下にスクロール・レイアウトするための反転ビュー（macOS 14+）
 class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -45,7 +45,7 @@ class SectionCardView: NSView {
     }
 }
 
-/// 右ペインのスタック設定・タイムラプス設定ビューコントローラ（macOS 10.12+ 互換）
+/// 右ペインのスタック設定・タイムラプス設定ビューコントローラ（macOS 14+）
 public class SettingsViewController: NSViewController {
 
     private let tabSegmentedControl = NSSegmentedControl()
@@ -61,10 +61,16 @@ public class SettingsViewController: NSViewController {
     private let trailRemovalCheckbox = NSButton(checkboxWithTitle: "✈️ 飛行機・人工衛星の光跡を除去", target: nil, action: nil)
     private let analyzeTrailsButton = NSButton()
     private let trailStatusBadge = NSTextField(labelWithString: "")
-    private let compositeModeSegmented = NSSegmentedControl()
+    private let skyGroundMaskCheckbox = NSButton(
+        checkboxWithTitle: "空と地上を分けて合成（ブラシを使用）",
+        target: nil,
+        action: nil
+    )
     private let brushModeSegmented = NSSegmentedControl()
     private let brushSizeSlider = NSSlider(value: 20, minValue: 5, maxValue: 150, target: nil, action: nil)
     private let brushSizeLabel = NSTextField(labelWithString: "20 px")
+    private let maskFeatherSlider = NSSlider(value: 12, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let maskFeatherLabel = NSTextField(labelWithString: "12 px")
     private let clearMaskButton = NSButton()
 
     // レンズプロファイル
@@ -95,6 +101,7 @@ public class SettingsViewController: NSViewController {
     private let codecPopup = NSPopUpButton()
     private let startTimelapseButton = NSButton()
     private let timelapseStatusLabel = NSTextField(labelWithString: "")
+    private var stateChangeObserver: NSObjectProtocol?
 
     override public func loadView() {
         self.view = NSView()
@@ -107,7 +114,11 @@ public class SettingsViewController: NSViewController {
     override public func viewDidLoad() {
         super.viewDidLoad()
 
-        StackingStateController.shared.onStateChanged = { [weak self] in
+        stateChangeObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidChange,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
             self?.updateUI()
         }
 
@@ -116,6 +127,12 @@ public class SettingsViewController: NSViewController {
         }
 
         updateUI()
+    }
+
+    deinit {
+        if let observer = stateChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func setupUI() {
@@ -246,13 +263,11 @@ public class SettingsViewController: NSViewController {
 
         // カード2: コンポジット & マスク
         let maskCard = SectionCardView(title: "合成 & 空・地上マスク")
-        compositeModeSegmented.translatesAutoresizingMaskIntoConstraints = false
-        compositeModeSegmented.segmentCount = 2
-        compositeModeSegmented.setLabel("空 + 地上", forSegment: 0)
-        compositeModeSegmented.setLabel("単一合成", forSegment: 1)
-        compositeModeSegmented.selectedSegment = 0
-        compositeModeSegmented.target = self
-        compositeModeSegmented.action = #selector(onCompositeModeChanged)
+        skyGroundMaskCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        skyGroundMaskCheckbox.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        skyGroundMaskCheckbox.state = StackingStateController.shared.enableSkyGroundMask ? .on : .off
+        skyGroundMaskCheckbox.target = self
+        skyGroundMaskCheckbox.action = #selector(onSkyGroundMaskToggled)
 
         brushModeSegmented.translatesAutoresizingMaskIntoConstraints = false
         brushModeSegmented.segmentCount = 3
@@ -269,12 +284,30 @@ public class SettingsViewController: NSViewController {
         sizeTitle.textColor = .secondaryLabelColor
 
         brushSizeSlider.translatesAutoresizingMaskIntoConstraints = false
+        brushSizeSlider.isContinuous = true
         brushSizeSlider.target = self
         brushSizeSlider.action = #selector(onBrushSizeChanged)
 
         brushSizeLabel.translatesAutoresizingMaskIntoConstraints = false
         brushSizeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         brushSizeLabel.alignment = .right
+
+        let featherTitle = NSTextField(labelWithString: "境界ぼかし:")
+        featherTitle.translatesAutoresizingMaskIntoConstraints = false
+        featherTitle.font = NSFont.systemFont(ofSize: 10)
+        featherTitle.textColor = .secondaryLabelColor
+
+        maskFeatherSlider.translatesAutoresizingMaskIntoConstraints = false
+        maskFeatherSlider.identifier = NSUserInterfaceItemIdentifier("MaskFeatherSlider")
+        maskFeatherSlider.isContinuous = true
+        maskFeatherSlider.target = self
+        maskFeatherSlider.action = #selector(onMaskFeatherChanged)
+        maskFeatherSlider.toolTip = "空と地上の境界を合成時に滑らかにします（0 pxで無効）"
+
+        maskFeatherLabel.translatesAutoresizingMaskIntoConstraints = false
+        maskFeatherLabel.identifier = NSUserInterfaceItemIdentifier("MaskFeatherLabel")
+        maskFeatherLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        maskFeatherLabel.alignment = .right
 
         clearMaskButton.translatesAutoresizingMaskIntoConstraints = false
         clearMaskButton.title = "マスクをクリア"
@@ -283,19 +316,22 @@ public class SettingsViewController: NSViewController {
         clearMaskButton.target = self
         clearMaskButton.action = #selector(onClearMaskClicked)
 
-        maskCard.container.addSubview(compositeModeSegmented)
+        maskCard.container.addSubview(skyGroundMaskCheckbox)
         maskCard.container.addSubview(brushModeSegmented)
         maskCard.container.addSubview(sizeTitle)
         maskCard.container.addSubview(brushSizeSlider)
         maskCard.container.addSubview(brushSizeLabel)
+        maskCard.container.addSubview(featherTitle)
+        maskCard.container.addSubview(maskFeatherSlider)
+        maskCard.container.addSubview(maskFeatherLabel)
         maskCard.container.addSubview(clearMaskButton)
 
         NSLayoutConstraint.activate([
-            compositeModeSegmented.topAnchor.constraint(equalTo: maskCard.container.topAnchor),
-            compositeModeSegmented.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
-            compositeModeSegmented.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
+            skyGroundMaskCheckbox.topAnchor.constraint(equalTo: maskCard.container.topAnchor),
+            skyGroundMaskCheckbox.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
+            skyGroundMaskCheckbox.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
-            brushModeSegmented.topAnchor.constraint(equalTo: compositeModeSegmented.bottomAnchor, constant: 8),
+            brushModeSegmented.topAnchor.constraint(equalTo: skyGroundMaskCheckbox.bottomAnchor, constant: 8),
             brushModeSegmented.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             brushModeSegmented.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
@@ -311,7 +347,19 @@ public class SettingsViewController: NSViewController {
             brushSizeLabel.centerYAnchor.constraint(equalTo: brushSizeSlider.centerYAnchor),
             brushSizeLabel.widthAnchor.constraint(equalToConstant: 38),
 
-            clearMaskButton.topAnchor.constraint(equalTo: brushSizeSlider.bottomAnchor, constant: 6),
+            featherTitle.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
+            featherTitle.centerYAnchor.constraint(equalTo: maskFeatherSlider.centerYAnchor),
+            featherTitle.widthAnchor.constraint(equalToConstant: 64),
+
+            maskFeatherSlider.topAnchor.constraint(equalTo: brushSizeSlider.bottomAnchor, constant: 6),
+            maskFeatherSlider.leadingAnchor.constraint(equalTo: featherTitle.trailingAnchor, constant: 2),
+            maskFeatherSlider.trailingAnchor.constraint(equalTo: maskFeatherLabel.leadingAnchor, constant: -4),
+
+            maskFeatherLabel.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
+            maskFeatherLabel.centerYAnchor.constraint(equalTo: maskFeatherSlider.centerYAnchor),
+            maskFeatherLabel.widthAnchor.constraint(equalToConstant: 38),
+
+            clearMaskButton.topAnchor.constraint(equalTo: maskFeatherSlider.bottomAnchor, constant: 6),
             clearMaskButton.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             clearMaskButton.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
             clearMaskButton.bottomAnchor.constraint(equalTo: maskCard.container.bottomAnchor),
@@ -528,7 +576,7 @@ public class SettingsViewController: NSViewController {
 
         fpsSlider.translatesAutoresizingMaskIntoConstraints = false
         fpsSlider.target = self
-        fpsSlider.action = #selector(onFpsChanged)
+        fpsSlider.action = #selector(onPlaybackSpeedChanged)
 
         fpsLabel.translatesAutoresizingMaskIntoConstraints = false
         fpsLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -703,7 +751,6 @@ public class SettingsViewController: NSViewController {
         alignCheckbox.isEnabled = !isCompareBright
         if isCompareBright {
             alignCheckbox.state = .off
-            state.enableAlignment = false
         } else {
             alignCheckbox.state = state.enableAlignment ? .on : .off
         }
@@ -717,15 +764,48 @@ public class SettingsViewController: NSViewController {
         trailStatusBadge.isHidden = !isCompareBright || !state.enableTrailRemoval
         trailStatusBadge.stringValue = state.trailAnalysisStatus
 
+        // マスクOFF時は、ブラシに関係する操作とキャンバス処理を完全に無効化する。
+        skyGroundMaskCheckbox.state = state.enableSkyGroundMask ? .on : .off
+        switch state.brushMode {
+        case .sky: brushModeSegmented.selectedSegment = 0
+        case .ground: brushModeSegmented.selectedSegment = 1
+        case .erase: brushModeSegmented.selectedSegment = 2
+        }
+        brushSizeSlider.doubleValue = Double(state.brushSize)
+        brushSizeLabel.stringValue = "\(Int(round(state.brushSize))) px"
+        brushModeSegmented.isEnabled = state.enableSkyGroundMask
+        brushSizeSlider.isEnabled = state.enableSkyGroundMask
+        brushSizeLabel.isEnabled = state.enableSkyGroundMask
+        maskFeatherSlider.isEnabled = state.enableSkyGroundMask
+        maskFeatherLabel.isEnabled = state.enableSkyGroundMask
+        maskFeatherSlider.doubleValue = Double(state.maskFeatherRadius)
+        maskFeatherLabel.stringValue = "\(Int(round(state.maskFeatherRadius))) px"
+        clearMaskButton.isEnabled = state.enableSkyGroundMask && state.maskBitmap != nil
+
         // ボタンの有効化
         startStackButton.isEnabled = !state.isStacking && !state.isAnalyzingTrails && lightCount > 0 && state.baseImage != nil
-        exportButton.isEnabled = (state.stackedResult != nil || state.previewImage != nil)
+        exportButton.isEnabled = state.stackedResult != nil
         statusLabel.stringValue = state.stackingStatus
 
         // タイムラプス更新
         let maxFrames = max(1, lightCount)
         startFrameSlider.maxValue = Double(maxFrames - 1)
         endFrameSlider.maxValue = Double(maxFrames - 1)
+        startFrameSlider.doubleValue = Double(min(state.timelapseSettings.startFrame, maxFrames - 1))
+        endFrameSlider.doubleValue = Double(min(state.timelapseSettings.endFrame, maxFrames - 1))
+        durationModeSegmented.selectedSegment = state.timelapseSettings.durationMode == .fps ? 0 : 1
+        if state.timelapseSettings.durationMode == .fps {
+            fpsSlider.minValue = 1
+            fpsSlider.maxValue = 120
+            fpsSlider.doubleValue = state.timelapseSettings.effectiveFps
+            fpsLabel.stringValue = "\(Int(round(state.timelapseSettings.effectiveFps))) fps"
+        } else {
+            let minimumDuration = max(1.0, ceil(Double(state.timelapseSettings.effectiveFrameCount) / 120.0))
+            fpsSlider.minValue = minimumDuration
+            fpsSlider.maxValue = max(600, minimumDuration)
+            fpsSlider.doubleValue = max(minimumDuration, state.timelapseSettings.targetDuration)
+            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) 秒"
+        }
         frameRangeLabel.stringValue = "フレーム数: \(state.timelapseSettings.effectiveFrameCount) / 推定: \(String(format: "%.1f", state.timelapseSettings.estimatedDuration))秒"
         startTimelapseButton.isEnabled = !state.isExportingTimelapse && lightCount > 0
         timelapseStatusLabel.stringValue = state.timelapseStatus
@@ -736,11 +816,31 @@ public class SettingsViewController: NSViewController {
     private func presentTrailReview(items: [DetectedTrailItem]) {
         guard !items.isEmpty else { return }
         let reviewVC = TrailReviewViewController(items: items)
+        guard let hostWindow = view.window else {
+            presentAsSheet(reviewVC)
+            return
+        }
+        let reviewWindow = reviewVC.makeReviewWindow()
+        reviewVC.onDismissRequested = { [weak hostWindow, weak reviewWindow] in
+            guard let reviewWindow else { return }
+            hostWindow?.ignoresMouseEvents = false
+            hostWindow?.removeChildWindow(reviewWindow)
+            reviewWindow.orderOut(nil)
+            reviewWindow.close()
+        }
         reviewVC.onConfirmed = { confirmedItems in
             StackingStateController.shared.detectedTrails = confirmedItems
             StackingStateController.shared.startStacking(forceDirectExecution: true)
         }
-        presentAsSheet(reviewVC)
+        hostWindow.addChildWindow(reviewWindow, ordered: .above)
+        let hostFrame = hostWindow.frame
+        let reviewFrame = reviewWindow.frame
+        reviewWindow.setFrameOrigin(NSPoint(
+            x: hostFrame.midX - reviewFrame.width / 2,
+            y: hostFrame.midY - reviewFrame.height / 2
+        ))
+        hostWindow.ignoresMouseEvents = true
+        reviewWindow.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - アクション
@@ -774,8 +874,8 @@ public class SettingsViewController: NSViewController {
         StackingStateController.shared.analyzeTrails()
     }
 
-    @objc private func onCompositeModeChanged() {
-        StackingStateController.shared.compositingMode = (compositeModeSegmented.selectedSegment == 0 ? "SkyGround" : "Sky")
+    @objc private func onSkyGroundMaskToggled() {
+        StackingStateController.shared.enableSkyGroundMask = (skyGroundMaskCheckbox.state == .on)
     }
 
     @objc private func onBrushModeChanged() {
@@ -790,6 +890,12 @@ public class SettingsViewController: NSViewController {
     @objc private func onBrushSizeChanged() {
         StackingStateController.shared.brushSize = CGFloat(brushSizeSlider.doubleValue)
         brushSizeLabel.stringValue = "\(Int(brushSizeSlider.doubleValue)) px"
+    }
+
+    @objc private func onMaskFeatherChanged() {
+        let radius = CGFloat(maskFeatherSlider.doubleValue.rounded())
+        StackingStateController.shared.maskFeatherRadius = radius
+        maskFeatherLabel.stringValue = "\(Int(radius)) px"
     }
 
     @objc private func onClearMaskClicked() {
@@ -822,13 +928,20 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onExportClicked() {
         let state = StackingStateController.shared
-        let img = state.showResult ? state.stackedResult : state.loadNSImage(from: state.previewImage)
-        if let img = img {
+        if let img = state.stackedResult {
             ImageExporter.export(
                 image: img,
                 format: state.exportFormat,
                 metadata: state.getEffectiveMetadata(),
-                embedLensProfile: state.embedLensProfile
+                embedLensProfile: state.embedLensProfile,
+                completion: { result in
+                    switch result {
+                    case .success(let url):
+                        state.stackingStatus = "✅ 書き出し完了: \(url.lastPathComponent)"
+                    case .failure(let error):
+                        state.stackingStatus = "❌ 書き出し失敗: \(error.localizedDescription)"
+                    }
+                }
             )
         }
     }
@@ -837,18 +950,30 @@ public class SettingsViewController: NSViewController {
         let state = StackingStateController.shared
         state.timelapseSettings.startFrame = Int(startFrameSlider.doubleValue)
         state.timelapseSettings.endFrame = max(state.timelapseSettings.startFrame, Int(endFrameSlider.doubleValue))
+        endFrameSlider.doubleValue = Double(state.timelapseSettings.endFrame)
         updateUI()
     }
 
     @objc private func onTimelapseDurationModeChanged() {
         let isFps = durationModeSegmented.selectedSegment == 0
-        StackingStateController.shared.timelapseSettings.durationMode = isFps ? .fps : .duration
+        let state = StackingStateController.shared
+        state.timelapseSettings.durationMode = isFps ? .fps : .duration
+        if !isFps {
+            let minimumDuration = max(1.0, ceil(Double(state.timelapseSettings.effectiveFrameCount) / 120.0))
+            state.timelapseSettings.targetDuration = max(minimumDuration, state.timelapseSettings.targetDuration)
+        }
         updateUI()
     }
 
-    @objc private func onFpsChanged() {
-        StackingStateController.shared.timelapseSettings.fps = fpsSlider.doubleValue
-        fpsLabel.stringValue = "\(Int(fpsSlider.doubleValue)) fps"
+    @objc private func onPlaybackSpeedChanged() {
+        let state = StackingStateController.shared
+        if state.timelapseSettings.durationMode == .fps {
+            state.timelapseSettings.fps = fpsSlider.doubleValue
+            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) fps"
+        } else {
+            state.timelapseSettings.targetDuration = fpsSlider.doubleValue
+            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) 秒"
+        }
         updateUI()
     }
 
