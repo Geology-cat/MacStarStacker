@@ -67,7 +67,7 @@ MacStarStacker/
 - macOS 14 以降
 - 現在の配布DMG: x86_64（Apple SiliconではRosetta 2が必要）
 - Xcode Command Line Tools (`xcode-select --install`)
-- OpenCV (Homebrew): `brew install opencv`
+- OpenCV 4系 (Homebrew): `brew install opencv@4`（Homebrew の `opencv` が4系の環境ではそれも使用可。OpenCV 5系は未対応）
 - LibRaw (Homebrew): `brew install libraw`（RAWをベイヤー配列・カメラ色空間のまま合成するために使用）
 - ExifTool (推奨): `brew install exiftool`
 

@@ -43,7 +43,8 @@ jobs:
         run: |
           # macOSランナーに残る未信頼の外部tapを外し、Homebrewの警告を防ぐ。
           brew untap aws/tap 2>/dev/null || true
-          brew install opencv libraw pkg-config
+          # Homebrew の opencv は5系になったため、4系（opencv@4）を入れる
+          brew install opencv@4 libraw pkg-config
 
       - name: 全テストを実行
         run: swift test --package-path MacStarStacker.swiftpm
