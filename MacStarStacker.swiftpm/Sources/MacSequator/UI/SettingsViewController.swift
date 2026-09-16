@@ -102,6 +102,7 @@ public class SettingsViewController: NSViewController {
     private let startTimelapseButton = NSButton()
     private let timelapseStatusLabel = NSTextField(labelWithString: "")
     private var stateChangeObserver: NSObjectProtocol?
+    private var stateResetObserver: NSObjectProtocol?
 
     override public func loadView() {
         self.view = NSView()
@@ -121,6 +122,18 @@ public class SettingsViewController: NSViewController {
         ) { [weak self] _ in
             self?.updateUI()
         }
+        stateResetObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidReset,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // 起動時と同じくスタックタブを表示する。
+            self.tabSegmentedControl.selectedSegment = 0
+            self.onTabChanged()
+            self.view.window?.makeFirstResponder(nil)
+            self.updateUI()
+        }
 
         StackingStateController.shared.onRequestShowTrailReview = { [weak self] items in
             self?.presentTrailReview(items: items)
@@ -130,7 +143,7 @@ public class SettingsViewController: NSViewController {
     }
 
     deinit {
-        if let observer = stateChangeObserver {
+        for observer in [stateChangeObserver, stateResetObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -732,6 +745,26 @@ public class SettingsViewController: NSViewController {
             lensInfoParamsLabel.stringValue = ""
         }
 
+        // 状態側の値をポップアップ・入力欄へ反映する（「すべてクリア」後も表示が食い違わないように）。
+        let stackModeIndex: Int
+        switch state.stackMode {
+        case "Median":         stackModeIndex = 1
+        case "Compare Bright": stackModeIndex = 2
+        default:               stackModeIndex = 0
+        }
+        if stackModePopup.indexOfSelectedItem != stackModeIndex {
+            stackModePopup.selectItem(at: stackModeIndex)
+        }
+        let formatIndex = ImageExporter.ExportFormat.allCases.firstIndex(of: state.exportFormat) ?? 0
+        if formatPopup.indexOfSelectedItem != formatIndex {
+            formatPopup.selectItem(at: formatIndex)
+        }
+        embedLensCheckbox.state = state.embedLensProfile ? .on : .off
+        // 入力中の文字列を通知のたびに巻き戻さないよう、編集中でないときだけ同期する。
+        if customLensField.currentEditor() == nil, customLensField.stringValue != state.customLensModel {
+            customLensField.stringValue = state.customLensModel
+        }
+
         // レンズプロファイル設定の有効・無効化（RAW/DNG専用）
         let isDNG = (state.exportFormat == .dng)
         embedLensCheckbox.isEnabled = isDNG
@@ -794,6 +827,23 @@ public class SettingsViewController: NSViewController {
         startFrameSlider.doubleValue = Double(min(state.timelapseSettings.startFrame, maxFrames - 1))
         endFrameSlider.doubleValue = Double(min(state.timelapseSettings.endFrame, maxFrames - 1))
         durationModeSegmented.selectedSegment = state.timelapseSettings.durationMode == .fps ? 0 : 1
+        alignTimelapseCheckbox.state = state.timelapseSettings.alignFrames ? .on : .off
+        deflickerCheckbox.state = state.timelapseSettings.deflicker ? .on : .off
+        autoStretchTimelapseCheckbox.state = state.timelapseSettings.autoStretch ? .on : .off
+        let resolutionIndex: Int
+        switch state.timelapseSettings.resolution {
+        case .original: resolutionIndex = 0
+        case .r4k:      resolutionIndex = 1
+        case .r1080p:   resolutionIndex = 2
+        case .r720p:    resolutionIndex = 3
+        }
+        if resolutionPopup.indexOfSelectedItem != resolutionIndex {
+            resolutionPopup.selectItem(at: resolutionIndex)
+        }
+        let codecIndex = state.timelapseSettings.codec == .hevc ? 1 : 0
+        if codecPopup.indexOfSelectedItem != codecIndex {
+            codecPopup.selectItem(at: codecIndex)
+        }
         if state.timelapseSettings.durationMode == .fps {
             fpsSlider.minValue = 1
             fpsSlider.maxValue = 120

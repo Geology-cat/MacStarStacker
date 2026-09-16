@@ -1,5 +1,36 @@
 import Cocoa
 
+/// 「すべてクリア」の確認ダイアログ。ボタンとメニューの両方から同じ手順で呼び出す。
+enum ResetAllConfirmation {
+    static func run(for window: NSWindow?) {
+        let state = StackingStateController.shared
+        guard state.canResetAll else {
+            NSSound.beep()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "すべてクリアしますか？"
+        alert.informativeText = "読み込んだ画像（Light / Dark / Flat / Bias）、スタック結果、マスク、各種設定を破棄して起動時の状態に戻します。この操作は取り消せません。"
+        alert.addButton(withTitle: "すべてクリア")
+        alert.addButton(withTitle: "キャンセル")
+        if #available(macOS 11.0, *) {
+            alert.buttons.first?.hasDestructiveAction = true
+        }
+
+        let handler: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertFirstButtonReturn else { return }
+            StackingStateController.shared.resetAll()
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: handler)
+        } else {
+            handler(alert.runModal())
+        }
+    }
+}
+
 /// 左ペインのファイル一覧・管理ビューコントローラ（macOS 14+）
 public class FileListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
 
@@ -9,11 +40,13 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     private let headerLabel = NSTextField(labelWithString: "ファイルリスト")
     private let addButton = NSButton()
     private let clearButton = NSButton()
+    private let resetAllButton = NSButton()
     private let baseInfoView = NSView()
     private let baseInfoLabel = NSTextField(labelWithString: "")
 
     private var currentType: ImageType = .light
     private var stateChangeObserver: NSObjectProtocol?
+    private var stateResetObserver: NSObjectProtocol?
 
     override public func loadView() {
         let dropView = ImageDropView()
@@ -38,12 +71,23 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         ) { [weak self] _ in
             self?.updateUI()
         }
+        stateResetObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidReset,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
+            // 起動時と同じくLightタブ表示に戻す。
+            self?.currentType = .light
+            self?.segmentedTypePicker.selectedSegment = 0
+            self?.tableView.deselectAll(nil)
+            self?.updateUI()
+        }
 
         updateUI()
     }
 
     deinit {
-        if let observer = stateChangeObserver {
+        for observer in [stateChangeObserver, stateResetObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -53,6 +97,16 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         headerLabel.translatesAutoresizingMaskIntoConstraints = false
         headerLabel.font = NSFont.boldSystemFont(ofSize: 13)
         view.addSubview(headerLabel)
+
+        resetAllButton.translatesAutoresizingMaskIntoConstraints = false
+        resetAllButton.title = "すべてクリア"
+        resetAllButton.bezelStyle = .roundRect
+        resetAllButton.font = NSFont.systemFont(ofSize: 11)
+        resetAllButton.contentTintColor = .systemRed
+        resetAllButton.toolTip = "画像・結果・マスク・設定をすべて破棄して起動時の状態に戻します"
+        resetAllButton.target = self
+        resetAllButton.action = #selector(onResetAllClicked)
+        view.addSubview(resetAllButton)
 
         // 2. 基準画像情報バナー
         baseInfoView.translatesAutoresizingMaskIntoConstraints = false
@@ -89,7 +143,8 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         view.addSubview(addButton)
 
         clearButton.translatesAutoresizingMaskIntoConstraints = false
-        clearButton.title = "クリア"
+        clearButton.title = "リストをクリア"
+        clearButton.toolTip = "表示中の種類（Light / Dark / Flat / Bias）の画像だけを削除します"
         clearButton.bezelStyle = .roundRect
         clearButton.font = NSFont.systemFont(ofSize: 11)
         clearButton.target = self
@@ -115,6 +170,10 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         NSLayoutConstraint.activate([
             headerLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
             headerLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            headerLabel.trailingAnchor.constraint(lessThanOrEqualTo: resetAllButton.leadingAnchor, constant: -8),
+
+            resetAllButton.centerYAnchor.constraint(equalTo: headerLabel.centerYAnchor),
+            resetAllButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
 
             baseInfoView.topAnchor.constraint(equalTo: headerLabel.bottomAnchor, constant: 6),
             baseInfoView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
@@ -136,7 +195,7 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
 
             clearButton.topAnchor.constraint(equalTo: segmentedTypePicker.bottomAnchor, constant: 6),
             clearButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            clearButton.widthAnchor.constraint(equalToConstant: 60),
+            clearButton.widthAnchor.constraint(equalToConstant: 96),
 
             scrollView.topAnchor.constraint(equalTo: addButton.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
@@ -166,6 +225,8 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         segmentedTypePicker.setLabel("Dark (\(state.count(for: .dark)))", forSegment: 1)
         segmentedTypePicker.setLabel("Flat (\(state.count(for: .flat)))", forSegment: 2)
         segmentedTypePicker.setLabel("Bias (\(state.count(for: .bias)))", forSegment: 3)
+
+        resetAllButton.isEnabled = state.canResetAll
 
         tableView.reloadData()
     }
@@ -232,6 +293,10 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
             guard response == .OK, let self = self else { return }
             StackingStateController.shared.add(urls: panel.urls, to: self.currentType)
         }
+    }
+
+    @objc private func onResetAllClicked() {
+        ResetAllConfirmation.run(for: view.window)
     }
 
     @objc private func onClearClicked() {

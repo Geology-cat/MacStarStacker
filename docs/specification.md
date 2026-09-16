@@ -47,12 +47,21 @@
 ### 3.5 画像の書き出し
 - **出力フォーマット**:
   - **RAW形式 / 16bit リニアDNG (Linear RAW)**:
-    - DNG 1.4互換
-    - **レンズ情報埋め込み**: 基準RAWに紐づくレンズモデル名（`LensModel`）、レンズメーカー（`LensMake`）、焦点距離（`FocalLength`）、F値（`FNumber`）、レンズ仕様（`LensSpecification`）、カラーマトリクスをEXIF/TIFFタグとして埋め込み
-    - **XMPレンズ補正メタデータ**: Adobe Camera Raw / Lightroom 向けに `crs:LensProfileEnable="1"`, `crs:LensProfileSetup="LensDefaults"`, `crs:LensProfileName` などを埋め込み。自動適用の可否は現像ソフト側のレンズプロファイル対応に依存
-    - **ExifTool連携**: ExifToolと元RAWが利用可能な場合に、対応する追加タグのコピーを試行（失敗時はネイティブ生成DNGを保持）
+    - DNG 1.4互換。Adobe製リニアDNGと同じ構成で書き出す
+      - **IFD0**: 256px 8bit sRGBサムネイル + DNG共通タグ・埋め込みカメラプロファイル
+      - **SubIFD[0]**: 主画像（16bit リニアsRGB, `PhotometricInterpretation=LinearRaw`, `NewSubFileType=0`, 約8MBごとのストリップ分割）
+      - **SubIFD[1]**: 長辺1024pxのJPEGプレビュー（`PreviewColorSpace=sRGB`）
+      - IFD・XMPをファイル先頭側、画素データを後ろ側に配置する（macOSのFinder/QuickLookはIFDが先頭付近にないと埋め込みプレビューを使わず、サムネイルが真っ黒になるため）
+    - **カラー・階調**: スタック結果はトーン処理済みの画像のため、Camera Raw / Lightroom で開いたときにアプリ上の表示と同じ見た目になるよう、無変換の埋め込みプロファイルを使う
+      - `UniqueCameraModel` / `ProfileName` は実カメラ名と重ならない固有名（実カメラ名は `Make` / `Model` に保持）とし、Adobeのカメラ別プロファイルが適用されないようにする
+      - `ColorMatrix1`（XYZ(D65)→リニアsRGB）、`ForwardMatrix1`（リニアsRGB→XYZ(D50)）、`CalibrationIlluminant1`=D65、`AsShotNeutral`=1,1,1
+      - `ProfileToneCurve` を直線（0,0 → 1,1）、`DefaultBlackRender`=None、`BaselineExposure`=0
+      - XMPで `crs:CameraProfile`（埋め込みプロファイル名）と `crs:ToneCurveName2012="Linear"` を指定し、「Adobe カラー」等のルックを掛けない
+    - **レンズ情報埋め込み**: 基準RAWに紐づくレンズモデル名（`LensModel`）、レンズメーカー（`LensMake`）、焦点距離（`FocalLength`）、F値（`FNumber`）、レンズ仕様（`LensSpecification`）をEXIFタグとして埋め込み
+    - **XMPレンズ補正メタデータ**: Adobe Camera Raw / Lightroom 向けに `crs:LensProfileEnable="1"`, `crs:LensProfileSetup="Auto"` を埋め込み、プロファイルはレンズ情報から現像ソフト側で自動選択させる
+    - **ExifTool連携**: ExifToolと元RAWが利用可能な場合に、撮影情報（露出・レンズ・日時・GPS）だけを許可リスト方式でコピー。`Orientation`、センサー固有タグ（黒/白レベル・CFA配列等）、メーカーノートはコピーしない（失敗時はネイティブ生成DNGを保持）
   - **16bit TIFF**: 16bit TIFF出力（ExifToolと元RAWが利用可能な場合はメタデータのコピーを試行）
-  - **32bit FITS**: 天体写真解析用32bit浮動小数点FITS出力
+  - **32bit FITS**: 天体写真解析用32bit浮動小数点カラーFITS出力（`NAXIS=3`, `NAXIS3=3`、R・G・Bプレーン順、リニアsRGB 0〜1、`ROWORDER='BOTTOM-UP'`）
   - **高画質JPEG**: プレビュー・Web共有用
 - **出力設定**: 保存先ディレクトリの指定、ファイル名の自動採番、レンズプロファイル埋め込みのON/OFF切り替えおよび手動編集
 

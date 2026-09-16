@@ -5,6 +5,8 @@ import OpenCVWrapper
 
 extension Notification.Name {
     static let stackingStateDidChange = Notification.Name("MacStarStacker.StackingStateDidChange")
+    /// 「すべてクリア」実行時に、ビュー側だけが持つ状態（タブ・ズーム等）を初期化するための通知。
+    static let stackingStateDidReset = Notification.Name("MacStarStacker.StackingStateDidReset")
 }
 
 /// アプリ全体の状態管理およびスタッキング・エクスポート処理を司るコントローラ（macOS 14+）
@@ -213,6 +215,52 @@ class StackingStateController {
         }
         if removedPreview { previewImage = images[.light]?.first }
         notifyStateChanged()
+    }
+
+    /// スタッキング・光跡解析・タイムラプス書き出しの実行中はリセットできない。
+    var canResetAll: Bool { !isStacking && !isAnalyzingTrails && !isExportingTimelapse }
+
+    /// 読み込んだ画像・結果・マスク・各種設定をすべて破棄し、起動直後の状態へ戻す。
+    /// Undo履歴は画像リストしか保持しておらず部分的にしか戻せないため、併せて破棄する。
+    func resetAll() {
+        guard canResetAll else { return }
+        let defaults = StackingStateController()
+
+        images = defaults.images
+        baseImage = nil
+        previewImage = nil
+        baseImageMetadata = nil
+
+        enableAutoStretch = defaults.enableAutoStretch
+        enableAlignment = defaults.enableAlignment
+        stackMode = defaults.stackMode
+        enableSkyGroundMask = defaults.enableSkyGroundMask
+        maskBitmap = nil
+        brushSize = defaults.brushSize
+        maskFeatherRadius = defaults.maskFeatherRadius
+        brushMode = defaults.brushMode
+
+        embedLensProfile = defaults.embedLensProfile
+        customLensModel = defaults.customLensModel
+        customLensMake = defaults.customLensMake
+        exportFormat = defaults.exportFormat
+
+        stackingProgress = defaults.stackingProgress
+        stackingStatus = defaults.stackingStatus
+        stackedResult = nil
+        stackedResultMetadata = nil
+        showResult = defaults.showResult
+
+        timelapseSettings = defaults.timelapseSettings
+        timelapseProgress = defaults.timelapseProgress
+        timelapseStatus = defaults.timelapseStatus
+
+        enableTrailRemoval = defaults.enableTrailRemoval
+        invalidateTrailAnalysis()
+
+        undoHistory.removeAll()
+        notifyStateChanged()
+        NotificationCenter.default.post(name: .stackingStateDidReset, object: self)
     }
 
     private func normalizeTimelapseRange() {

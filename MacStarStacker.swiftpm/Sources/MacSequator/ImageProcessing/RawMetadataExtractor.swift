@@ -312,6 +312,43 @@ public enum RawMetadataExtractor {
         return info
     }
     
+    /// 元画像の撮影情報（露出・レンズ・日時・GPS）だけを書き出しファイルへコピーする。
+    ///
+    /// `-all:all>all:all` の一括コピーは、元RAWのセンサー固有タグ（BlackLevel / WhiteLevel /
+    /// CFAPattern / ActiveArea / DefaultCrop 等）や Orientation、センサーデータ前提のメーカーノートまで持ち込み、
+    /// デモザイク済み・回転済みの書き出し画像と矛盾してAdobe製品で開けなくなる恐れがあるため、許可リスト方式にする。
+    /// ExifToolが無い場合やコピーに失敗した場合は何もしない（ネイティブに書いたタグだけで有効なファイルになっている）。
+    static func copyShootingMetadata(from sourceURL: URL, to targetURL: URL, extraArguments: [String] = []) {
+        guard let exiftool = findExiftool() else { return }
+
+        let copiedTags = [
+            "-EXIF:ExposureTime", "-EXIF:FNumber", "-EXIF:ExposureProgram", "-EXIF:ISO",
+            "-EXIF:DateTimeOriginal", "-EXIF:CreateDate", "-EXIF:OffsetTime*", "-EXIF:SubSecTime*",
+            "-EXIF:ExposureCompensation", "-EXIF:MeteringMode", "-EXIF:Flash",
+            "-EXIF:FocalLength", "-EXIF:FocalLengthIn35mmFormat",
+            "-EXIF:LensInfo", "-EXIF:LensMake", "-EXIF:LensModel", "-EXIF:LensSerialNumber",
+            "-EXIF:SerialNumber", "-EXIF:Artist", "-EXIF:Copyright",
+            "-GPS:all"
+        ]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: exiftool)
+        // タグ代入は -tagsFromFile のコピーより後ろに置くことで、コピー結果を上書きできる。
+        process.arguments = ["-tagsFromFile", sourceURL.path] + copiedTags + extraArguments
+            + ["-overwrite_original", targetURL.path]
+        // 読み出さないパイプはバッファが埋まるとwaitUntilExitが戻らなくなるため、出力は破棄する。
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // 同期失敗時はネイティブ生成されたファイルのままで問題なし
+            // （-overwrite_original は書き込み成功時のみ置換するため、失敗しても元ファイルは壊れない）
+        }
+    }
+
     /// システム上の exiftool の実行可能パスを探す
     public static func findExiftool() -> String? {
         let candidates = [

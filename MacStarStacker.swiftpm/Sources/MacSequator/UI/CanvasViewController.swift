@@ -20,6 +20,7 @@ public class CanvasViewController: NSViewController {
     private let progressIndicator = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
     private var stateChangeObserver: NSObjectProtocol?
+    private var stateResetObserver: NSObjectProtocol?
     private var cachedPreviewFileID: UUID?
     private var cachedPreviewAutoStretch: Bool?
     private var cachedPreviewImage: NSImage?
@@ -47,14 +48,31 @@ public class CanvasViewController: NSViewController {
         ) { [weak self] _ in
             self?.updateState()
         }
+        stateResetObserver = NotificationCenter.default.addObserver(
+            forName: .stackingStateDidReset,
+            object: StackingStateController.shared,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resetViewState()
+        }
 
         updateState()
     }
 
     deinit {
-        if let observer = stateChangeObserver {
+        for observer in [stateChangeObserver, stateResetObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(observer)
         }
+    }
+
+    /// 「すべてクリア」時に、表示倍率とプレビューキャッシュを起動時の状態へ戻す。
+    private func resetViewState() {
+        cachedPreviewFileID = nil
+        cachedPreviewAutoStretch = nil
+        cachedPreviewImage = nil
+        canvasView.zoomScale = 1.0
+        canvasView.panOffset = .zero
+        updateState()
     }
 
     private func setupUI() {

@@ -119,80 +119,92 @@ class ImageExporter {
         }
         try data.write(to: url, options: .atomic)
 
-        // ExifToolが存在する場合はメタデータをTIFFにも同期
-        if let meta = metadata, let src = meta.sourceURL, let exiftool = RawMetadataExtractor.findExiftool() {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: exiftool)
-            process.arguments = ["-tagsFromFile", src.path, "-all:all>all:all", "-overwrite_original", url.path]
-            try? process.run()
-            process.waitUntilExit()
+        // ExifToolが存在する場合は撮影情報をTIFFにも同期（Orientation等の構造タグはコピーしない）
+        if let src = metadata?.sourceURL {
+            RawMetadataExtractor.copyShootingMetadata(from: src, to: url, extraArguments: ["-EXIF:Make", "-EXIF:Model"])
         }
     }
 
     // MARK: - 32bit FITS
-    /// Writes a minimal monochrome FITS file (grayscale luminance, float32 per pixel).
+    /// RGBカラーの32bit浮動小数点FITSを書き出す（NAXIS=3, NAXIS3=3）。
+    /// 画素はリニアsRGBの0〜1で、R・G・B各プレーンを順に格納する（Siril / PixInsight 等と同じ並び）。
     private static func save32bitFITS(image: NSImage, to url: URL) throws {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw ExportError(message: "FITS用画像を取得できませんでした")
         }
         let width = cgImage.width
         let height = cgImage.height
+        let planePixels = width * height
 
-        // リニア32bit浮動小数点グレースケールへ直接描画し、16bit入力の階調を保持する。
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        var gray = [Float](repeating: 0, count: width * height)
-        let rendered = gray.withUnsafeMutableBytes { bytes -> Bool in
+        // リニア32bit浮動小数点RGBへ直接描画し、16bit入力の階調とカラーを保持する。
+        // FITS読み込み側（ImageLoader）もリニアsRGBとして解釈するため、往復で値が変わらない。
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        var rgba = [Float](repeating: 0, count: planePixels * 4)
+        let rendered = rgba.withUnsafeMutableBytes { bytes -> Bool in
             guard let baseAddress = bytes.baseAddress,
                   let ctx = CGContext(
                     data: baseAddress,
                     width: width,
                     height: height,
                     bitsPerComponent: 32,
-                    bytesPerRow: width * 4,
+                    bytesPerRow: width * 16,
                     space: colorSpace,
                     bitmapInfo: CGBitmapInfo.floatComponents.rawValue
                         | CGBitmapInfo.byteOrder32Little.rawValue
-                        | CGImageAlphaInfo.none.rawValue
+                        | CGImageAlphaInfo.noneSkipLast.rawValue
                   ) else { return false }
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
         guard rendered else { throw ExportError(message: "FITS用画素データを生成できませんでした") }
 
-        // Build a minimal valid FITS header (36 header cards, each 80 bytes = 2880-byte block)
-        let naxis1 = width
-        let naxis2 = height
+        // FITSヘッダ（80バイトのカードを2880バイト単位のブロックに詰める）
         var headerCards: [String] = [
-            fitsCard("SIMPLE",  "T",                 "/ conforms to FITS standard"),
-            fitsCard("BITPIX",  "-32",               "/ 32-bit float"),
-            fitsCard("NAXIS",   "2",                 "/ 2D image"),
-            fitsCard("NAXIS1",  String(naxis1),      "/ axis 1 length (width)"),
-            fitsCard("NAXIS2",  String(naxis2),      "/ axis 2 length (height)"),
-            fitsCard("BSCALE",  "1.0",               "/ data scale factor"),
-            fitsCard("BZERO",   "0.0",               "/ data zero offset"),
-            fitsCard("CREATOR", "'MacStarStacker'",  "/ software"),
+            fitsCard("SIMPLE",   "T",                 "/ conforms to FITS standard"),
+            fitsCard("BITPIX",   "-32",               "/ 32-bit float"),
+            fitsCard("NAXIS",    "3",                 "/ RGB color cube"),
+            fitsCard("NAXIS1",   String(width),       "/ axis 1 length (width)"),
+            fitsCard("NAXIS2",   String(height),      "/ axis 2 length (height)"),
+            fitsCard("NAXIS3",   "3",                 "/ color planes (R, G, B)"),
+            fitsCard("BSCALE",   "1.0",               "/ data scale factor"),
+            fitsCard("BZERO",    "0.0",               "/ data zero offset"),
+            fitsCard("DATAMIN",  "0.0",               "/ minimum data value"),
+            fitsCard("DATAMAX",  "1.0",               "/ maximum data value"),
+            fitsCard("CTYPE3",   "'RGB     '",        "/ plane order: red, green, blue"),
+            fitsCard("ROWORDER", "'BOTTOM-UP'",       "/ first row is the bottom of the image"),
+            fitsCard("CREATOR",  "'MacStarStacker'",  "/ software"),
             "END" + String(repeating: " ", count: 77)
         ]
-        // Pad header to multiple of 2880 bytes
         while (headerCards.count * 80) % 2880 != 0 {
             headerCards.append(String(repeating: " ", count: 80))
         }
 
         var data = Data()
+        data.reserveCapacity(headerCards.count * 80 + planePixels * 3 * 4 + 2880)
         for card in headerCards {
             data.append(contentsOf: Array(card.utf8))
         }
 
-        // FITS pixels: big-endian Float32. FITS stores bottom-left first, so flip vertically.
-        for row in stride(from: height - 1, through: 0, by: -1) {
-            for col in 0..<width {
-                let pixelValue = gray[row * width + col]
-                var bigEndian = pixelValue.bitPattern.bigEndian
-                withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+        // 画素はビッグエンディアンFloat32。FITSは左下原点なので各プレーン内で上下反転する。
+        var plane = [UInt8](repeating: 0, count: planePixels * 4)
+        for channel in 0..<3 {
+            var outputIndex = 0
+            for row in stride(from: height - 1, through: 0, by: -1) {
+                let rowStart = row * width
+                for col in 0..<width {
+                    let value = min(1, max(0, rgba[(rowStart + col) * 4 + channel]))
+                    let bits = value.bitPattern
+                    plane[outputIndex]     = UInt8(truncatingIfNeeded: bits >> 24)
+                    plane[outputIndex + 1] = UInt8(truncatingIfNeeded: bits >> 16)
+                    plane[outputIndex + 2] = UInt8(truncatingIfNeeded: bits >> 8)
+                    plane[outputIndex + 3] = UInt8(truncatingIfNeeded: bits)
+                    outputIndex += 4
+                }
             }
+            data.append(contentsOf: plane)
         }
 
-        // Pad data to multiple of 2880 bytes
+        // データ部も2880バイト単位にパディング
         let remainder = data.count % 2880
         if remainder != 0 {
             data.append(contentsOf: [UInt8](repeating: 0, count: 2880 - remainder))
@@ -216,7 +228,11 @@ class ImageExporter {
     // MARK: - FITS Helper
     private static func fitsCard(_ keyword: String, _ value: String, _ comment: String) -> String {
         let kw = keyword.padding(toLength: 8, withPad: " ", startingAt: 0)
-        let entry = "\(kw)= \(value) \(comment)"
+        // FITS固定書式: 文字列は11桁目から、数値・論理値は30桁目に右詰めで書く。
+        let formattedValue = value.hasPrefix("'")
+            ? value.padding(toLength: max(20, value.count), withPad: " ", startingAt: 0)
+            : String(repeating: " ", count: max(0, 20 - value.count)) + value
+        let entry = "\(kw)= \(formattedValue) \(comment)"
         return entry.padding(toLength: 80, withPad: " ", startingAt: 0)
     }
 }

@@ -61,6 +61,7 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "すべてを選択", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "マスクをクリア", action: #selector(onClearMask), keyEquivalent: "k")
+        editMenu.addItem(withTitle: "すべてクリア…", action: #selector(onResetAll), keyEquivalent: "")
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
@@ -111,6 +112,10 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func onClearMask() {
         guard StackingStateController.shared.enableSkyGroundMask else { return }
         StackingStateController.shared.maskBitmap = nil
+    }
+
+    @objc private func onResetAll() {
+        ResetAllConfirmation.run(for: NSApp.mainWindow)
     }
 
     @objc private func onStartStack() {
