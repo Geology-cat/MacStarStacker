@@ -984,6 +984,7 @@ public class SettingsViewController: NSViewController {
                 format: state.exportFormat,
                 metadata: state.getEffectiveMetadata(),
                 embedLensProfile: state.embedLensProfile,
+                rawResult: state.stackedRawResult,
                 completion: { result in
                     switch result {
                     case .success(let url):

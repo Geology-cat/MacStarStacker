@@ -3,8 +3,10 @@ import PackageDescription
 
 #if arch(arm64)
 let opencvPrefix = "/opt/homebrew/opt/opencv"
+let librawPrefix = "/opt/homebrew/opt/libraw"
 #else
 let opencvPrefix = "/usr/local/opt/opencv"
+let librawPrefix = "/usr/local/opt/libraw"
 #endif
 
 let package = Package(
@@ -43,9 +45,24 @@ let package = Package(
                 ], .when(platforms: [.macOS]))
             ]
         ),
+        // RAWのベイヤー配列・カメラ色空間データを読むためのLibRawブリッジ（brew install libraw）
+        .target(
+            name: "LibRawBridge",
+            dependencies: [],
+            path: "Sources/LibRawBridge",
+            cSettings: [
+                .unsafeFlags(["-I\(librawPrefix)/include/libraw"], .when(platforms: [.macOS]))
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L\(librawPrefix)/lib",
+                    "-lraw_r"
+                ], .when(platforms: [.macOS]))
+            ]
+        ),
         .executableTarget(
             name: "MacSequator",
-            dependencies: ["OpenCVWrapper"],
+            dependencies: ["OpenCVWrapper", "LibRawBridge"],
             path: "Sources/MacSequator",
             exclude: ["Info.plist", "AppIcon.icns"],
             resources: [

@@ -55,6 +55,8 @@ class StackingStateController {
     var stackingStatus: String = "" { didSet { if oldValue != stackingStatus { notifyStateChanged() } } }
     var stackedResult: NSImage? = nil { didSet { notifyStateChanged() } }
     var stackedResultMetadata: RawMetadataInfo? = nil
+    /// RAWを現像せずに合成できた場合の結果（DNG書き出しはこちらのセンサーデータを使う）
+    var stackedRawResult: RawStackResult? = nil
     var showResult: Bool = false { didSet { if oldValue != showResult { notifyStateChanged() } } }
 
     // ── タイムラプス設定 ──
@@ -249,6 +251,7 @@ class StackingStateController {
         stackingStatus = defaults.stackingStatus
         stackedResult = nil
         stackedResultMetadata = nil
+        stackedRawResult = nil
         showResult = defaults.showResult
 
         timelapseSettings = defaults.timelapseSettings
@@ -431,6 +434,7 @@ class StackingStateController {
         stackingProgress = 0.0
         stackingStatus = "キャリブレーションフレームを構築中..."
         stackedResult = nil
+        stackedRawResult = nil
         notifyStateChanged()
 
         let darkFiles  = images[.dark]  ?? []
@@ -448,6 +452,54 @@ class StackingStateController {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+
+            // 全てベイヤー配列のRAWなら、現像せずにセンサーデータのまま合成する
+            // （位置合わせなし・比較明はベイヤー配列、位置合わせありはカメラ色空間RGB）。
+            let rawInput = RawStackPipeline.Input(
+                lights: lightFiles.map(\.url),
+                baseIndex: lightFiles.firstIndex(where: { $0.id == base.id }) ?? 0,
+                darks: darkFiles.map(\.url),
+                flats: flatFiles.map(\.url),
+                biases: biasFiles.map(\.url),
+                mode: mode == "Median" ? .median : (mode == "Compare Bright" ? .compareBright : .average),
+                align: doAlign,
+                skyGroundMask: mask,
+                maskFeatherRadius: maskFeather,
+                trailMasks: trailRemovalActive
+                    ? Dictionary(grouping: trailItems.filter(\.isMarkedForRemoval), by: \.frameIndex)
+                        .mapValues { $0.compactMap(\.maskImage) }
+                    : [:]
+            )
+            var rawFallbackReason: String?
+            do {
+                if let rawResult = try RawStackPipeline.stack(rawInput, progress: { fraction, status in
+                    DispatchQueue.main.async {
+                        self.stackingProgress = fraction
+                        self.stackingStatus = status
+                        self.notifyStateChanged()
+                    }
+                }) {
+                    let resolvedBaseMetadata = knownBaseMetadata ?? RawMetadataExtractor.extract(from: base.url)
+                    DispatchQueue.main.async {
+                        self.stackedResult = rawResult.displayImage
+                        self.stackedRawResult = rawResult
+                        self.stackedResultMetadata = resolvedBaseMetadata
+                        self.previewImage = nil
+                        self.stackingProgress = 1.0
+                        self.stackingStatus = "✅ スタッキング完了！（\(rawResult.modeDescription)で合成）"
+                        self.isStacking = false
+                        self.showResult = true
+                        self.notifyStateChanged()
+                    }
+                    return
+                }
+            } catch let error as RawStackPipeline.PipelineError where !error.allowsFallback {
+                self.finishStackingWithError(error.message)
+                return
+            } catch {
+                // RAWのまま合成できない場合は、従来どおり現像済み画像で合成する
+                rawFallbackReason = error.localizedDescription
+            }
 
             let darkNSImages = darkFiles.compactMap  { ImageLoader.load(from: $0.url) }
             let flatNSImages = flatFiles.compactMap  { ImageLoader.load(from: $0.url) }
@@ -599,7 +651,11 @@ class StackingStateController {
                 self.stackedResultMetadata = resolvedBaseMetadata
                 self.previewImage = nil
                 self.stackingProgress = 1.0
-                self.stackingStatus = "✅ スタッキング完了！"
+                if let rawFallbackReason {
+                    self.stackingStatus = "✅ スタッキング完了（RAWのまま合成できなかったため現像済み画像で合成: \(rawFallbackReason)）"
+                } else {
+                    self.stackingStatus = "✅ スタッキング完了！"
+                }
                 self.isStacking = false
                 self.showResult = true
                 self.notifyStateChanged()

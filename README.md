@@ -53,7 +53,8 @@ MacStarStacker/
 │   ├── build_app.sh                   # dist/ にビルド・パッケージングするスクリプト
 │   └── Sources/
 │       ├── MacSequator/               # AppKit UI, コントローラ, 画像処理エンジン
-│       └── OpenCVWrapper/             # OpenCV C++ アライメントラッパー
+│       ├── OpenCVWrapper/             # OpenCV C++ アライメントラッパー
+│       └── LibRawBridge/              # LibRaw C ブリッジ（RAWのセンサーデータ読み込み・デモザイク）
 ├── .gitignore
 └── README.md
 ```
@@ -67,6 +68,7 @@ MacStarStacker/
 - 現在の配布DMG: x86_64（Apple SiliconではRosetta 2が必要）
 - Xcode Command Line Tools (`xcode-select --install`)
 - OpenCV (Homebrew): `brew install opencv`
+- LibRaw (Homebrew): `brew install libraw`（RAWをベイヤー配列・カメラ色空間のまま合成するために使用）
 - ExifTool (推奨): `brew install exiftool`
 
 ### アプリケーションおよびDMGのビルド

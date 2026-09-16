@@ -101,7 +101,9 @@ public class AppDelegate: NSObject, NSApplicationDelegate {
             image: img,
             format: state.exportFormat,
             metadata: state.getEffectiveMetadata(),
-            embedLensProfile: state.embedLensProfile
+            embedLensProfile: state.embedLensProfile,
+            // スタック結果を書き出すときだけRAW合成結果を使う（プレビュー画像の書き出しでは使わない）
+            rawResult: state.stackedResult != nil ? state.stackedRawResult : nil
         )
     }
 

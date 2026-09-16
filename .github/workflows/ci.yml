@@ -38,12 +38,12 @@ jobs:
             exit 1
           fi
 
-      - name: OpenCVを準備
+      - name: OpenCVとLibRawを準備
         shell: bash
         run: |
           # macOSランナーに残る未信頼の外部tapを外し、Homebrewの警告を防ぐ。
           brew untap aws/tap 2>/dev/null || true
-          brew install opencv pkg-config
+          brew install opencv libraw pkg-config
 
       - name: 全テストを実行
         run: swift test --package-path MacStarStacker.swiftpm

@@ -6,30 +6,10 @@
 
 #import "ImageAligner.h"
 
-@implementation ImageAligner
-
-+ (NSImage *)alignImageAtURL:(NSURL *)targetURL
-            toBaseImageAtURL:(NSURL *)baseURL
-                       error:(NSError **)error {
-
-  // Load as Grayscale for feature extraction
-  cv::Mat im_target_gray =
-      cv::imread(targetURL.path.UTF8String, cv::IMREAD_GRAYSCALE);
-  cv::Mat im_base_gray =
-      cv::imread(baseURL.path.UTF8String, cv::IMREAD_GRAYSCALE);
-
-  if (im_target_gray.empty() || im_base_gray.empty()) {
-    if (error) {
-      *error =
-          [NSError errorWithDomain:@"ImageAlignerDomain"
-                              code:1
-                          userInfo:@{
-                            NSLocalizedDescriptionKey : @"画像を読み込めませんでした"
-                          }];
-    }
-    return nil;
-  }
-
+// 特徴点（AKAZE、低コントラスト時はORB）の対応からホモグラフィを推定する。
+// target の座標を base の座標へ写す 3x3 行列を返し、失敗時は空の行列を返す。
+static cv::Mat EstimateHomography(const cv::Mat &im_target_gray, const cv::Mat &im_base_gray,
+                                  NSError **error) {
   // --- High-precision feature detection using AKAZE ---
   // AKAZE produces binary descriptors and is invariant to
   // scale, rotation, and non-linear distortions.
@@ -55,7 +35,7 @@
                                 NSLocalizedDescriptionKey : @"位置合わせに必要な特徴点が見つかりませんでした"
                             }];
       }
-      return nil;
+      return cv::Mat();
     }
   }
 
@@ -73,7 +53,7 @@
                    NSLocalizedDescriptionKey : @"一致する特徴点が不足しています"
                  }];
     }
-    return nil;
+    return cv::Mat();
   }
 
   // Sort by distance and take the best 80%
@@ -109,7 +89,7 @@
                    NSLocalizedDescriptionKey : @"画像間の変換を計算できませんでした"
                  }];
     }
-    return nil;
+    return cv::Mat();
   }
 
   const int inlierCount = inlierMask.empty() ? 0 : cv::countNonZero(inlierMask);
@@ -123,6 +103,38 @@
                    NSLocalizedDescriptionKey : @"位置合わせの信頼度が不足しています"
                  }];
     }
+    return cv::Mat();
+  }
+
+  return homography;
+}
+
+@implementation ImageAligner
+
++ (NSImage *)alignImageAtURL:(NSURL *)targetURL
+            toBaseImageAtURL:(NSURL *)baseURL
+                       error:(NSError **)error {
+
+  // Load as Grayscale for feature extraction
+  cv::Mat im_target_gray =
+      cv::imread(targetURL.path.UTF8String, cv::IMREAD_GRAYSCALE);
+  cv::Mat im_base_gray =
+      cv::imread(baseURL.path.UTF8String, cv::IMREAD_GRAYSCALE);
+
+  if (im_target_gray.empty() || im_base_gray.empty()) {
+    if (error) {
+      *error =
+          [NSError errorWithDomain:@"ImageAlignerDomain"
+                              code:1
+                          userInfo:@{
+                            NSLocalizedDescriptionKey : @"画像を読み込めませんでした"
+                          }];
+    }
+    return nil;
+  }
+
+  cv::Mat homography = EstimateHomography(im_target_gray, im_base_gray, error);
+  if (homography.empty()) {
     return nil;
   }
 
@@ -169,6 +181,63 @@
   cv::cvtColor(im_aligned, im_rgb, cv::COLOR_BGR2RGB);
 
   return [self NSImageFromMat:im_rgb];
+}
+
+
++ (NSArray<NSNumber *> *)homographyFromGrayPixels:(NSData *)targetGray
+                                     toBaseGray:(NSData *)baseGray
+                                          width:(NSInteger)width
+                                         height:(NSInteger)height
+                                          error:(NSError **)error {
+  if (width <= 0 || height <= 0 || targetGray.length < (NSUInteger)(width * height) ||
+      baseGray.length < (NSUInteger)(width * height)) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"ImageAlignerDomain"
+                                   code:8
+                               userInfo:@{NSLocalizedDescriptionKey : @"位置合わせ用の画素データが不正です"}];
+    }
+    return nil;
+  }
+  cv::Mat target((int)height, (int)width, CV_8UC1, (void *)targetGray.bytes);
+  cv::Mat base((int)height, (int)width, CV_8UC1, (void *)baseGray.bytes);
+  cv::Mat homography = EstimateHomography(target, base, error);
+  if (homography.empty()) return nil;
+  homography.convertTo(homography, CV_64F);
+  NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:9];
+  for (int row = 0; row < 3; row++) {
+    for (int col = 0; col < 3; col++) {
+      [values addObject:@(homography.at<double>(row, col))];
+    }
+  }
+  return values;
+}
+
++ (BOOL)warpRGB16Pixels:(NSMutableData *)pixels
+                  width:(NSInteger)width
+                 height:(NSInteger)height
+             homography:(NSArray<NSNumber *> *)homography
+                  error:(NSError **)error {
+  if (homography.count != 9 || width <= 0 || height <= 0 ||
+      pixels.length < (NSUInteger)(width * height * 3 * sizeof(uint16_t))) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"ImageAlignerDomain"
+                                   code:9
+                               userInfo:@{NSLocalizedDescriptionKey : @"変形する画素データが不正です"}];
+    }
+    return NO;
+  }
+  cv::Mat matrix(3, 3, CV_64F);
+  for (int index = 0; index < 9; index++) {
+    matrix.at<double>(index / 3, index % 3) = homography[index].doubleValue;
+  }
+  // 色空間の解釈を挟まず、16bitのカメラRGB値をそのまま変形する（範囲外は0）。
+  cv::Mat source((int)height, (int)width, CV_16UC3, pixels.mutableBytes);
+  cv::Mat warped;
+  cv::warpPerspective(source, warped, matrix, source.size(), cv::INTER_LANCZOS4,
+                      cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+  if (!warped.isContinuous()) warped = warped.clone();
+  memcpy(pixels.mutableBytes, warped.data, (size_t)(width * height * 3) * sizeof(uint16_t));
+  return YES;
 }
 
 // ── Helper: cv::Mat → NSImage ──────────────────────────────────────────

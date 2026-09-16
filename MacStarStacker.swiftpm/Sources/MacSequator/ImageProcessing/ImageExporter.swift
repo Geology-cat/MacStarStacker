@@ -33,6 +33,7 @@ class ImageExporter {
         format: ExportFormat,
         metadata: RawMetadataInfo? = nil,
         embedLensProfile: Bool = true,
+        rawResult: RawStackResult? = nil,
         completion: ((Result<URL, Error>) -> Void)? = nil
     ) {
         DispatchQueue.main.async {
@@ -48,7 +49,7 @@ class ImageExporter {
                     do {
                         try write(
                             image: image, format: format, metadata: metadata,
-                            embedLensProfile: embedLensProfile, to: url
+                            embedLensProfile: embedLensProfile, rawResult: rawResult, to: url
                         )
                         result = .success(url)
                     } catch {
@@ -72,11 +73,17 @@ class ImageExporter {
         format: ExportFormat,
         metadata: RawMetadataInfo? = nil,
         embedLensProfile: Bool = true,
+        rawResult: RawStackResult? = nil,
         to url: URL
     ) throws {
         switch format {
         case .dng:
-            try DNGWriter.write(image: image, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+            if let rawResult {
+                // RAWのまま合成した結果は、センサーデータ（ベイヤー配列／カメラ色空間RGB）のままDNGにする
+                try rawResult.writeDNG(metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+            } else {
+                try DNGWriter.write(image: image, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+            }
         case .tiff16:
             try save16bitTIFF(image: image, metadata: metadata, to: url)
         case .fits32:

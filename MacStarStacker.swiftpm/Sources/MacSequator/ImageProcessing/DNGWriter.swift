@@ -39,18 +39,71 @@ public enum DNGWriter {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw writerError(1, "CGImageの取得に失敗しました")
         }
-        let meta = metadata ?? RawMetadataInfo()
 
-        // 1. 主画像（16bitリニアsRGB）、サムネイル（8bit sRGB）、プレビュー（JPEG）を用意する。
-        let raw = try renderLinearRGB16(cgImage)
-        let thumbnail = try renderSRGB8(cgImage, maxSide: thumbnailMaxSide)
-        let preview = try renderJPEGPreview(cgImage, maxSide: previewMaxSide)
-
-        // 2. バイナリDNG/TIFFファイルの構築
-        let dngData = buildDNGData(
-            raw: raw,
+        // 主画像（16bitリニアsRGB）、サムネイル（8bit sRGB）、プレビュー（JPEG）を用意する。
+        let main = MainImage(
+            kind: .linearSRGB,
+            data: try renderLinearRGB16(cgImage),
             width: cgImage.width,
-            height: cgImage.height,
+            height: cgImage.height
+        )
+        try writeDNG(main: main, previewSource: cgImage, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+    }
+
+    /// RAWを現像せずにベイヤー配列のまま合成した結果をDNGに書き出す。
+    /// - Parameters:
+    ///   - pixels: 有効画素領域の生の値（黒レベル込み、width * height 要素）
+    ///   - previewSource: サムネイル・プレビュー用の現像済み画像（センサーの向きのまま、回転しない）
+    static func writeBayer(
+        pixels: [UInt16],
+        width: Int,
+        height: Int,
+        mosaic: BayerMosaic,
+        camera: CameraColorProfile,
+        previewSource: CGImage,
+        metadata: RawMetadataInfo?,
+        embedLensProfile: Bool = true,
+        to url: URL
+    ) throws {
+        precondition(pixels.count == width * height, "ベイヤー配列の画素数が一致しません")
+        let main = MainImage(kind: .bayer(mosaic, camera), data: littleEndianData(pixels), width: width, height: height)
+        try writeDNG(main: main, previewSource: previewSource, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+    }
+
+    /// カメラ色空間のままデモザイクして合成した16bitリニアRGBをDNGに書き出す。
+    /// - Parameters:
+    ///   - pixels: RGBインターリーブ（黒レベル除去済み、ホワイトバランスなし、width * height * 3 要素）
+    ///   - whiteLevel: センサーの飽和に相当する値（LibRawの出力は65535より低くなる）
+    ///   - previewSource: サムネイル・プレビュー用の現像済み画像（センサーの向きのまま、回転しない）
+    static func writeCameraRGB(
+        pixels: [UInt16],
+        width: Int,
+        height: Int,
+        whiteLevel: Double = 65535,
+        camera: CameraColorProfile,
+        previewSource: CGImage,
+        metadata: RawMetadataInfo?,
+        embedLensProfile: Bool = true,
+        to url: URL
+    ) throws {
+        precondition(pixels.count == width * height * 3, "カメラRGBの画素数が一致しません")
+        let main = MainImage(kind: .cameraRGB(camera, whiteLevel: whiteLevel), data: littleEndianData(pixels), width: width, height: height)
+        try writeDNG(main: main, previewSource: previewSource, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
+    }
+
+    private static func writeDNG(
+        main: MainImage,
+        previewSource: CGImage,
+        metadata: RawMetadataInfo?,
+        embedLensProfile: Bool,
+        to url: URL
+    ) throws {
+        let meta = metadata ?? RawMetadataInfo()
+        let thumbnail = try renderSRGB8(previewSource, maxSide: thumbnailMaxSide)
+        let preview = try renderJPEGPreview(previewSource, maxSide: previewMaxSide)
+
+        let dngData = buildDNGData(
+            main: main,
             thumbnail: thumbnail,
             preview: preview,
             metadata: meta,
@@ -58,7 +111,7 @@ public enum DNGWriter {
         )
         try dngData.write(to: url, options: .atomic)
 
-        // 3. ExifToolと元RAWがある場合は、撮影情報タグだけを追加でコピーする。
+        // ExifToolと元RAWがある場合は、撮影情報タグだけを追加でコピーする。
         if embedLensProfile, let sourceURL = meta.sourceURL {
             RawMetadataExtractor.copyShootingMetadata(
                 from: sourceURL,
@@ -68,8 +121,74 @@ public enum DNGWriter {
         }
     }
 
+    private static func littleEndianData(_ values: [UInt16]) -> Data {
+        var data = Data(count: values.count * 2)
+        data.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
+            let out = output.bindMemory(to: UInt16.self)
+            for index in values.indices { out[index] = values[index].littleEndian }
+        }
+        return data
+    }
+
     private static func writerError(_ code: Int, _ message: String) -> NSError {
         NSError(domain: "MacStarStacker.DNGWriter", code: code, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    // MARK: - 主画像とカメラプロファイル
+
+    /// ベイヤー配列の並びとレベル（生の値）
+    struct BayerMosaic {
+        /// 左上 (0,0) (0,1) (1,0) (1,1) の色。0=R, 1=G, 2=B
+        let pattern: [UInt8]
+        /// pattern と同じ並びの黒レベル
+        let blackLevels: [Double]
+        let whiteLevel: Double
+    }
+
+    /// 実カメラの色情報。Adobeのカメラ別プロファイルがそのまま適用されるよう実カメラ名で書き出す。
+    struct CameraColorProfile {
+        let make: String
+        let model: String
+        /// Adobeのプロファイルと照合される名前（例: "Canon EOS 6D"）
+        let uniqueCameraModel: String
+        /// XYZ → カメラRGB
+        let colorMatrix1: [Double]
+        let illuminant1: Int
+        let colorMatrix2: [Double]?
+        let illuminant2: Int
+        let asShotNeutral: [Double]
+        let orientation: UInt16
+        /// 機種ごとの露出基準の補正（EV）。Adobe製DNGと同じくIFD0のBaselineExposureに書く。
+        var baselineExposure: Double = 0
+    }
+
+    private enum MainImageKind {
+        /// 現像済みのリニアsRGB（無変換プロファイルでアプリ表示と同じ見た目にする）
+        case linearSRGB
+        /// ベイヤー配列の生データ
+        case bayer(BayerMosaic, CameraColorProfile)
+        /// カメラ色空間のままデモザイクしたリニアRGB
+        case cameraRGB(CameraColorProfile, whiteLevel: Double)
+
+        var samplesPerPixel: Int {
+            if case .bayer = self { return 1 }
+            return 3
+        }
+
+        var camera: CameraColorProfile? {
+            switch self {
+            case .linearSRGB: return nil
+            case .bayer(_, let camera), .cameraRGB(let camera, _): return camera
+            }
+        }
+    }
+
+    private struct MainImage {
+        let kind: MainImageKind
+        /// リトルエンディアン16bit
+        let data: Data
+        let width: Int
+        let height: Int
     }
 
     // MARK: - 画素データの生成
@@ -282,21 +401,23 @@ public enum DNGWriter {
     }
 
     private static func buildDNGData(
-        raw: Data,
-        width: Int,
-        height: Int,
+        main: MainImage,
         thumbnail: RGB8Image,
         preview: JPEGPreview,
         metadata: RawMetadataInfo,
         embedLensProfile: Bool
     ) -> Data {
-        let xmpData = buildXMPPacket(metadata: metadata, embedLensProfile: embedLensProfile)
+        let raw = main.data
+        let width = main.width
+        let height = main.height
+        let camera = main.kind.camera
+        let xmpData = buildXMPPacket(metadata: metadata, embedLensProfile: embedLensProfile, neutralProfile: camera == nil)
         let exifTags = buildExifTags(metadata: metadata, embedLensProfile: embedLensProfile)
         let previewDateTime = ISO8601DateFormatter.string(
             from: Date(), timeZone: .current, formatOptions: [.withInternetDateTime]
         )
 
-        let bytesPerRow = width * 6
+        let bytesPerRow = width * 2 * main.kind.samplesPerPixel
         let rowsPerStrip = max(1, min(height, targetStripBytes / max(1, bytesPerRow)))
         let stripCount = (height + rowsPerStrip - 1) / rowsPerStrip
 
@@ -309,22 +430,45 @@ public enum DNGWriter {
                 stripByteCounts.append(UInt32(rows * bytesPerRow))
             }
 
-            // 主画像 SubIFD（16bit LinearRaw）
-            let rawTags: [TIFFTag] = [
+            // 主画像 SubIFD（16bit）
+            var rawTags: [TIFFTag] = [
                 longTag(254, 0),                                                          // NewSubFileType: 主画像
                 longTag(256, UInt32(width)),                                              // ImageWidth
                 longTag(257, UInt32(height)),                                             // ImageLength
-                shortTag(258, [16, 16, 16]),                                              // BitsPerSample
                 shortTag(259, [1]),                                                       // Compression: None
-                shortTag(262, [34892]),                                                   // PhotometricInterpretation: LinearRaw
                 TIFFTag(tag: 273, type: 4, count: UInt32(stripCount), valueOrData: .longs(stripOffsets)),     // StripOffsets
-                shortTag(277, [3]),                                                       // SamplesPerPixel
                 longTag(278, UInt32(rowsPerStrip)),                                       // RowsPerStrip
                 TIFFTag(tag: 279, type: 4, count: UInt32(stripCount), valueOrData: .longs(stripByteCounts)),  // StripByteCounts
                 shortTag(284, [1]),                                                       // PlanarConfiguration: Chunky
-                shortTag(0xC61A, [0, 0, 0]),                                              // BlackLevel
-                shortTag(0xC61D, [65535, 65535, 65535]),                                  // WhiteLevel
             ]
+            switch main.kind {
+            case .linearSRGB, .cameraRGB:
+                var white: UInt16 = 65535
+                if case .cameraRGB(_, let whiteLevel) = main.kind {
+                    white = UInt16(clamping: Int(whiteLevel.rounded()))
+                }
+                rawTags += [
+                    shortTag(258, [16, 16, 16]),                                          // BitsPerSample
+                    shortTag(262, [34892]),                                               // PhotometricInterpretation: LinearRaw
+                    shortTag(277, [3]),                                                   // SamplesPerPixel
+                    shortTag(0xC61A, [0, 0, 0]),                                          // BlackLevel
+                    shortTag(0xC61D, [white, white, white]),                              // WhiteLevel
+                ]
+            case .bayer(let mosaic, _):
+                let black = mosaic.blackLevels.map { (UInt32(max(0, ($0 * 100).rounded())), UInt32(100)) }
+                rawTags += [
+                    shortTag(258, [16]),                                                  // BitsPerSample
+                    shortTag(262, [32803]),                                               // PhotometricInterpretation: CFA
+                    shortTag(277, [1]),                                                   // SamplesPerPixel
+                    shortTag(0x828D, [2, 2]),                                             // CFARepeatPatternDim
+                    TIFFTag(tag: 0x828E, type: 1, count: 4, valueOrData: .bytes(mosaic.pattern)),              // CFAPattern
+                    TIFFTag(tag: 0xC616, type: 1, count: 3, valueOrData: .bytes([0, 1, 2])),                   // CFAPlaneColor: R,G,B
+                    shortTag(0xC617, [1]),                                                // CFALayout: Rectangular
+                    shortTag(0xC619, [2, 2]),                                             // BlackLevelRepeatDim
+                    TIFFTag(tag: 0xC61A, type: 5, count: 4, valueOrData: .rationals(black)),                   // BlackLevel
+                    longTag(0xC61D, UInt32(max(1, mosaic.whiteLevel.rounded()))),         // WhiteLevel
+                ]
+            }
 
             // プレビュー SubIFD（JPEG, sRGB）
             let sampling = preview.subsampling
@@ -350,8 +494,8 @@ public enum DNGWriter {
             ]
 
             // IFD0（サムネイル + DNG共通タグ + 埋め込みカメラプロファイル）
-            let make = metadata.cameraMake.isEmpty ? "Unknown" : metadata.cameraMake
-            let model = metadata.cameraModel.isEmpty ? "Unknown Camera" : metadata.cameraModel
+            let make = !metadata.cameraMake.isEmpty ? metadata.cameraMake : (camera?.make.isEmpty == false ? camera!.make : "Unknown")
+            let model = !metadata.cameraModel.isEmpty ? metadata.cameraModel : (camera?.model.isEmpty == false ? camera!.model : "Unknown Camera")
             var ifd0Tags: [TIFFTag] = [
                 longTag(254, 1),                                                          // NewSubFileType: 縮小画像（サムネイル）
                 longTag(256, UInt32(thumbnail.width)),
@@ -362,7 +506,7 @@ public enum DNGWriter {
                 asciiTag(271, make),                                                      // Make
                 asciiTag(272, model),                                                     // Model
                 longTag(273, layout.thumbnail),
-                shortTag(274, [1]),                                                       // Orientation: Top-Left
+                shortTag(274, [camera?.orientation ?? 1]),                                // Orientation
                 shortTag(277, [3]),
                 longTag(278, UInt32(thumbnail.height)),
                 longTag(279, UInt32(thumbnail.pixels.count)),
@@ -373,22 +517,15 @@ public enum DNGWriter {
 
                 TIFFTag(tag: 0xC612, type: 1, count: 4, valueOrData: .bytes([1, 4, 0, 0])),                   // DNGVersion: 1.4.0.0
                 TIFFTag(tag: 0xC613, type: 1, count: 4, valueOrData: .bytes([1, 3, 0, 0])),                   // DNGBackwardVersion: 1.3.0.0
-                asciiTag(0xC614, uniqueCameraModel),                                      // UniqueCameraModel
-                srationalMatrixTag(0xC621, xyzD65ToLinearSRGB),                           // ColorMatrix1
-                TIFFTag(tag: 0xC628, type: 5, count: 3, valueOrData: .rationals([(1, 1), (1, 1), (1, 1)])),   // AsShotNeutral
-                TIFFTag(tag: 0xC62A, type: 10, count: 1, valueOrData: .srationals([(0, 1)])),                 // BaselineExposure
-                shortTag(0xC65A, [21]),                                                   // CalibrationIlluminant1: D65
-                asciiTag(0xC6F8, embeddedProfileName),                                    // ProfileName
-                // 直線のトーンカーブを明示し、Adobe既定のコントラストカーブを掛けない
-                TIFFTag(tag: 0xC6FC, type: 11, count: 4, valueOrData: .floats([0, 0, 1, 1])),                 // ProfileToneCurve
-                longTag(0xC6FD, 0),                                                       // ProfileEmbedPolicy: Allow Copying
-                srationalMatrixTag(0xC714, linearSRGBToXYZD50),                           // ForwardMatrix1
                 asciiTag(0xC716, "MacStarStacker"),                                       // PreviewApplicationName
                 longTag(0xC71A, 2),                                                       // PreviewColorSpace: sRGB
                 asciiTag(0xC71B, previewDateTime),                                        // PreviewDateTime
-                TIFFTag(tag: 0xC7A5, type: 10, count: 1, valueOrData: .srationals([(0, 1)])),                 // BaselineExposureOffset
-                longTag(0xC7A6, 1),                                                       // DefaultBlackRender: None（自動黒補正なし）
             ]
+            if let camera {
+                ifd0Tags += cameraProfileTags(camera, metadata: metadata)
+            } else {
+                ifd0Tags += neutralProfileTags()
+            }
             if let dateTime = exifDateTimeString(metadata.dateTimeOriginal) {
                 ifd0Tags.append(asciiTag(306, dateTime))                                  // DateTime
             }
@@ -442,6 +579,47 @@ public enum DNGWriter {
         place(preview.data, at: layout.preview)
         place(raw, at: layout.raw)
         return data
+    }
+
+    /// 現像済みリニアsRGB用: 無変換のカメラプロファイル（アプリ表示と同じ見た目で現像させる）
+    private static func neutralProfileTags() -> [TIFFTag] {
+        [
+            asciiTag(0xC614, uniqueCameraModel),                                          // UniqueCameraModel
+            srationalMatrixTag(0xC621, xyzD65ToLinearSRGB),                               // ColorMatrix1
+            TIFFTag(tag: 0xC628, type: 5, count: 3, valueOrData: .rationals([(1, 1), (1, 1), (1, 1)])),       // AsShotNeutral
+            TIFFTag(tag: 0xC62A, type: 10, count: 1, valueOrData: .srationals([(0, 1)])),                     // BaselineExposure
+            shortTag(0xC65A, [21]),                                                       // CalibrationIlluminant1: D65
+            asciiTag(0xC6F8, embeddedProfileName),                                        // ProfileName
+            // 直線のトーンカーブを明示し、Adobe既定のコントラストカーブを掛けない
+            TIFFTag(tag: 0xC6FC, type: 11, count: 4, valueOrData: .floats([0, 0, 1, 1])),                     // ProfileToneCurve
+            longTag(0xC6FD, 0),                                                           // ProfileEmbedPolicy: Allow Copying
+            srationalMatrixTag(0xC714, linearSRGBToXYZD50),                               // ForwardMatrix1
+            TIFFTag(tag: 0xC7A5, type: 10, count: 1, valueOrData: .srationals([(0, 1)])),                     // BaselineExposureOffset
+            longTag(0xC7A6, 1),                                                           // DefaultBlackRender: None（自動黒補正なし）
+        ]
+    }
+
+    /// 実カメラのRAWデータ用: 実カメラ名と色変換行列・ホワイトバランスを書き、
+    /// Camera Raw / Lightroom で通常のRAWと同じプロファイル・調整幅で扱わせる。
+    private static func cameraProfileTags(_ camera: CameraColorProfile, metadata: RawMetadataInfo) -> [TIFFTag] {
+        let unique = !camera.uniqueCameraModel.isEmpty ? camera.uniqueCameraModel
+            : (!metadata.uniqueCameraModel.isEmpty ? metadata.uniqueCameraModel : "Unknown Camera")
+        var tags: [TIFFTag] = [
+            asciiTag(0xC614, unique),                                                     // UniqueCameraModel（実カメラ名）
+            srationalMatrixTag(0xC621, camera.colorMatrix1),                              // ColorMatrix1
+            shortTag(0xC65A, [UInt16(clamping: camera.illuminant1 > 0 ? camera.illuminant1 : 21)]),         // CalibrationIlluminant1
+        ]
+        if let matrix2 = camera.colorMatrix2 {
+            tags.append(srationalMatrixTag(0xC622, matrix2))                              // ColorMatrix2
+            tags.append(shortTag(0xC65B, [UInt16(clamping: camera.illuminant2 > 0 ? camera.illuminant2 : 21)])) // CalibrationIlluminant2
+        }
+        if camera.baselineExposure != 0 {
+            tags.append(TIFFTag(tag: 0xC62A, type: 10, count: 1,
+                                valueOrData: .srationals([(Int32((camera.baselineExposure * 100).rounded()), 100)]))) // BaselineExposure
+        }
+        let neutral = camera.asShotNeutral.prefix(3).map { (UInt32(max(1, ($0 * 1_000_000).rounded())), UInt32(1_000_000)) }
+        tags.append(TIFFTag(tag: 0xC628, type: 5, count: UInt32(neutral.count), valueOrData: .rationals(Array(neutral)))) // AsShotNeutral
+        return tags
     }
 
     private static func buildExifTags(metadata: RawMetadataInfo, embedLensProfile: Bool) -> [TIFFTag] {
@@ -551,16 +729,20 @@ public enum DNGWriter {
 
     // MARK: - XMP パケット生成 (Adobe Camera Raw 現像設定)
 
-    private static func buildXMPPacket(metadata: RawMetadataInfo, embedLensProfile: Bool) -> Data {
+    private static func buildXMPPacket(metadata: RawMetadataInfo, embedLensProfile: Bool, neutralProfile: Bool) -> Data {
         // 空の値は属性ごと省略する（空文字のaux:LensInfo等はAdobe製品で不正値として扱われうる）。
         var attributes: [String] = [
             "crs:Version=\"15.0\"",
             "crs:ProcessVersion=\"15.4\"",
-            "crs:HasSettings=\"True\"",
-            // 埋め込みプロファイルを選択させ、「Adobe カラー」等のルック（コントラスト・彩度の上乗せ）を掛けない。
-            "crs:CameraProfile=\"\(escapeXML(embeddedProfileName))\"",
-            "crs:ToneCurveName2012=\"Linear\"",
         ]
+        if neutralProfile {
+            attributes += [
+                "crs:HasSettings=\"True\"",
+                // 埋め込みプロファイルを選択させ、「Adobe カラー」等のルック（コントラスト・彩度の上乗せ）を掛けない。
+                "crs:CameraProfile=\"\(escapeXML(embeddedProfileName))\"",
+                "crs:ToneCurveName2012=\"Linear\"",
+            ]
+        }
         func addAttribute(_ name: String, _ value: String) {
             guard !value.isEmpty else { return }
             attributes.append("\(name)=\"\(escapeXML(value))\"")
