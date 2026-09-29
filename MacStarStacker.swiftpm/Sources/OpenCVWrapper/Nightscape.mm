@@ -12,6 +12,10 @@ namespace {
 const int kAnalysisMaxSide = 1000;
 /// 境界を画像の輪郭に沿わせる（ガイドフィルタ）ときの画像の長辺
 const int kGuideMaxSide = 3000;
+/// 判定用の画像から細かな構造（星や模様）を取り出すときに除く、なだらかな明るさのぼかしの大きさ（判定用の解像度のpx）
+const double kDetailSigma = 2.0;
+/// 空の手がかり（動く星）からこの距離（判定用の画像の長辺に対する割合）より離れた画素は、初めは地上寄りとみなす
+const double kStarSupportDistance = 0.03;
 
 NSError *NightscapeError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"NightscapeDomain" code:code userInfo:@{NSLocalizedDescriptionKey : message}];
@@ -144,6 +148,45 @@ cv::Mat ColorGuidedFilter(const cv::Mat &guide, const cv::Mat &p, int radius, do
     return q;
 }
 
+/// 地上の手がかり（255）を、各フレームの星と地上のずれ（relative: 星に合わせた座標 → 地上に合わせた座標）と
+/// その逆向きに動かしても手がかりのままの画素だけに縮める。画像の外は手がかりとみなす（縁で縮めすぎない）
+cv::Mat ErodeByRelativeMotion(const cv::Mat &seed, const std::vector<cv::Matx33d> &relative) {
+    cv::Mat result = seed.clone(), moved;
+    for (const cv::Matx33d &r : relative) {
+        for (const cv::Matx33d &m : {r, r.inv()}) {
+            // moved(x) = seed(m * x)
+            cv::warpPerspective(seed, moved, m, seed.size(), cv::INTER_NEAREST | cv::WARP_INVERSE_MAP,
+                                cv::BORDER_CONSTANT, cv::Scalar(255));
+            cv::min(result, moved, result);
+        }
+    }
+    return result;
+}
+
+/// 光害フレームのなだらかさ（長辺に対する割合）。手作業の見本（長辺5496px）の光害フレームのマスクは、地上との
+/// 境界からの距離 100px で0.83、300pxで0.60、500pxで0.36、700pxで0.18、1000pxで0.05 と、ほぼ σ=長辺の6.5% の
+/// ガウス型で弱まっていた
+const double kLightPollutionSigma = 0.065;
+
+/// 光害フレームを重ねる強さ（float32）。地上（空の割合0.5未満）との境界で1、空の奥へ向かってガウス型で0へ。
+/// 地平線付近の光害や大気の明るさは地上に対して動かないため、地上に合わせた星のない空から持ってくる
+cv::Mat LightPollutionWeight(const cv::Mat &skyAlpha) {
+    const int longSide = std::max(skyAlpha.cols, skyAlpha.rows);
+    // 計算量を抑えるため縮小して距離を求める（なだらかな重みなので縮小で十分）
+    const double scale = std::min(1.0, 1000.0 / longSide);
+    cv::Mat small;
+    cv::resize(skyAlpha, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    cv::Mat sky = small >= 0.5f;
+    cv::Mat distance;
+    cv::distanceTransform(sky, distance, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+    const double sigma = kLightPollutionSigma * longSide * scale;
+    cv::Mat weight;
+    cv::multiply(distance, distance, weight, -1.0 / (2.0 * sigma * sigma));
+    cv::exp(weight, weight);
+    cv::resize(weight, weight, skyAlpha.size(), 0, 0, cv::INTER_LINEAR);
+    return weight;
+}
+
 /// 空と地上の境界付近だけで色の違いが効くよう、明るさの重みを下げた Lab 色空間（8bit）にする
 cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     cv::Mat lab;
@@ -207,8 +250,9 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     int _width, _height;
     double _analysisScale, _guideScale;
     cv::Size _analysisSize, _guideSize;
-    cv::Mat _starSum, _starSumSq, _starCount;       // 星に合わせた輝度と二乗（判定用の解像度）
-    cv::Mat _groundSum, _groundSumSq, _groundCount; // 地上に合わせた輝度と二乗（判定用）
+    cv::Mat _starSum, _starSumSq, _starCount;       // 星に合わせた細かな構造（輝度の高周波）と二乗（判定用の解像度）
+    cv::Mat _groundSum, _groundSumSq, _groundCount; // 地上に合わせた細かな構造と二乗（判定用）
+    std::vector<cv::Matx33d> _relative;    // 各フレームの「星に合わせた座標 → 地上に合わせた座標」（判定用の解像度）
     cv::Mat _groundRGBSum;                 // 地上に合わせたRGB（判定用、GrabCut の色）
     cv::Mat _guideSum, _guideCount;        // 地上に合わせた輝度（境界の仕上げ用の解像度）
     double _maximumRelativeShift;          // 星と地上の動きの差の最大値（元の解像度のpx）
@@ -268,6 +312,11 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
 
     cv::Mat graySmall, rgbSmall, grayGuide;
     cv::resize(grayFull, graySmall, _analysisSize, 0, 0, cv::INTER_AREA);
+    // ばらつきは細かな構造（星・地上の模様や輪郭）だけで比べる。地平線付近の光害のようななだらかな明るさは
+    // 地上に対して動かないため、そのまま比べると星の見える空を地上と取り違える
+    cv::Mat smooth;
+    cv::GaussianBlur(graySmall, smooth, cv::Size(0, 0), kDetailSigma);
+    const cv::Mat detailSmall = graySmall - smooth;
     cv::resize(rgbFull, rgbSmall, _analysisSize, 0, 0, cv::INTER_AREA);
     rgbSmall.convertTo(rgbSmall, CV_32FC3);
     cv::resize(grayFull, grayGuide, _guideSize, 0, 0, cv::INTER_AREA);
@@ -276,13 +325,16 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     const cv::Matx33d hgGuide = ScaleHomography(hg, _guideScale);
     cv::Mat warped, valid;
 
-    cv::warpPerspective(graySmall, warped, hsSmall, _analysisSize, cv::INTER_LINEAR);
+    // 星に合わせた座標 x は、地上に合わせた座標では Hg * Hs^-1 * x（地上の手がかりを縮めるのに使う）
+    _relative.push_back(hgSmall * hsSmall.inv());
+
+    cv::warpPerspective(detailSmall, warped, hsSmall, _analysisSize, cv::INTER_LINEAR);
     valid = WarpValidity(_analysisSize, hsSmall);
     _starSum += warped.mul(valid);
     _starSumSq += warped.mul(warped).mul(valid);
     _starCount += valid;
 
-    cv::warpPerspective(graySmall, warped, hgSmall, _analysisSize, cv::INTER_LINEAR);
+    cv::warpPerspective(detailSmall, warped, hgSmall, _analysisSize, cv::INTER_LINEAR);
     valid = WarpValidity(_analysisSize, hgSmall);
     _groundSum += warped.mul(valid);
     _groundSumSq += warped.mul(warped).mul(valid);
@@ -308,7 +360,7 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     }
     cv::Mat starMean = _starSum / starCount;
     cv::Mat groundMean = _groundSum / groundCount;
-    // フレーム間のばらつき（分散）
+    // フレーム間の細かな構造のばらつき（分散）
     cv::Mat starVariance = cv::max(_starSumSq / starCount - starMean.mul(starMean), 0.0f);
     cv::Mat groundVariance = cv::max(_groundSumSq / groundCount - groundMean.mul(groundMean), 0.0f);
     cv::Mat groundRGB;
@@ -334,12 +386,13 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     cv::morphologyEx(seedSky, seedSky, cv::MORPH_OPEN, openKernel);
     cv::morphologyEx(seedGround, seedGround, cv::MORPH_OPEN, openKernel);
     // 稜線のすぐ上の空は、星に合わせると動いた地上のシルエットが通り過ぎてばらつき、地上に合わせても
-    // 星が通らない画素はばらつかないため、地上の手がかりに紛れ込む（境界から最大で「星と地上の動きの差」まで）。
-    // 地上の手がかりをその分だけ内側に縮め、境界付近は色で判断させる。
+    // 星が通らない画素はばらつかないため、地上の手がかりに紛れ込む。紛れ込むのは、星に合わせた座標 x から
+    // 見て地上に合わせた座標 Hg * Hs^-1 * x が地上になるフレームがある画素なので、各フレームの星と地上のずれ
+    // （とその逆向き）だけ地上の手がかりを縮める（ずれの無い向きには縮めないため、水平線の下の海などが残る）。
+    // 最後に、ばらつきを周囲7x7で平均した分だけさらに縮める。境界付近は色で判断させる。
     // 空の手がかりは地上に合わせてばらつく画素なので、動かない地上には紛れ込まない（縮めない）
-    const int margin = (int)std::ceil(_maximumRelativeShift * _analysisScale) + 2;
-    cv::Mat marginKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * margin + 1, 2 * margin + 1));
-    cv::erode(seedGround, seedGround, marginKernel);
+    seedGround = ErodeByRelativeMotion(seedGround, _relative);
+    cv::erode(seedGround, seedGround, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7)));
 
     // 利用者が塗った手がかりは確実なものとして扱う
     if (hints.length >= (NSUInteger)_width * _height) {
@@ -356,15 +409,19 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
 
     // 2. 境界: 地上に合わせた画像（輪郭がくっきり、ノイズが少ない）の色で GrabCut。
     //    空に写る星の軌跡に境界が引きずられないよう、明るく細い構造は取り除いた画像を使う。
-    //    手がかりの無い画素の初期の見立ては、細部の差を広くぼかした向き（空寄りか地上寄りか）で決める
+    //    手がかりの無い画素の初期の見立ては、細部の差を広くぼかした向き（空寄りか地上寄りか）で決める。
+    //    ただし近くに空の手がかり（動く星）が無い画素は地上寄りとする。模様も星も無いなだらかな海などは
+    //    どちらの手がかりも無く、空と色が近いと空にされて水平線がぼけるため
     cv::Mat binarySky;
     if (hasBoth) {
         const cv::Mat colorImage = HueWeightedLab(StretchForDisplay(RemoveBrightThinStructures(groundRGB, 5)));
+        const int longSide = std::max(_analysisSize.width, _analysisSize.height);
         cv::Mat tendency;
-        const double spread = std::max(3.0, 0.01 * std::max(_analysisSize.width, _analysisSize.height));
-        cv::GaussianBlur(difference, tendency, cv::Size(0, 0), spread);
+        cv::GaussianBlur(difference, tendency, cv::Size(0, 0), std::max(3.0, 0.01 * longSide));
+        cv::Mat distanceToStars;
+        cv::distanceTransform(seedSky == 0, distanceToStars, cv::DIST_L2, cv::DIST_MASK_PRECISE);
         cv::Mat grabMask(_analysisSize, CV_8U, cv::Scalar(cv::GC_PR_BGD));
-        grabMask.setTo(cv::GC_PR_FGD, tendency > 0);
+        grabMask.setTo(cv::GC_PR_FGD, (tendency > 0) & (distanceToStars <= kStarSupportDistance * longSide));
         grabMask.setTo(cv::GC_FGD, seedSky);
         grabMask.setTo(cv::GC_BGD, seedGround);
         cv::Mat backgroundModel, foregroundModel;
@@ -641,14 +698,7 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     }
     const cv::Size size(_width, _height);
     const cv::Mat alpha(size, CV_32F, (void *)_mask.skyAlpha.bytes);
-    // 継ぎ目の帯（空と地上が混ざる範囲の少し外側まで）。ここでは星のない空（地上の層）と比較明で合わせ、
-    // 空のデータが少ない継ぎ目が暗く沈むのを防ぐ
-    cv::Mat band = (alpha > 0.02f) & (alpha < 0.98f);
-    const int bandRadius = std::max(3, (int)std::lround(std::max(_width, _height) * 0.003));
-    cv::dilate(band, band, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * bandRadius + 1, 2 * bandRadius + 1)));
-    cv::Mat seam;
-    band.convertTo(seam, CV_32F, 1.0 / 255.0);
-    cv::GaussianBlur(seam, seam, cv::Size(0, 0), bandRadius * 0.5);
+    const int longSide = std::max(_width, _height);
 
     // 空と地上の層（重みで割った平均）。空のデータが無い画素（地平線のすぐ上など）は星のない空（地上の層）で埋める
     cv::Mat sky(size, CV_32FC3), ground(size, CV_32FC3);
@@ -665,27 +715,34 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
             }
         }
     });
-    // 空の層から星だけを取り出す（背景を除いた明るさ）。継ぎ目で星が薄くならないよう、星のない空に重ねて使う
-    const int starSize = std::max(5, (int)std::lround(std::max(_width, _height) * 0.0015) | 1);
+    // 空の層から星だけを取り出す（背景を除いた明るさ）。光害フレームに重ねて、継ぎ目付近の星が薄くならないようにする
+    const int starSize = std::max(5, (int)std::lround(longSide * 0.0015) | 1);
     cv::Mat stars;
     cv::morphologyEx(sky, stars, cv::MORPH_TOPHAT, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(starSize, starSize)));
+    // 光害フレーム: 地上に合わせた層の空（動く星は外れ値として除かれている）。星と地上の動きの差が小さいと
+    // 星が短い線として残るため、明るく細い構造を取り除いて、なだらかな光害・地平線の明るさだけにする
+    const cv::Mat lightPollution = RemoveBrightThinStructures(ground, 2 * starSize + 1);
+    // 光害フレームを重ねる強さ: 地上との境界で1、空の奥へ向かってなだらかに0へ
+    const cv::Mat lightPollutionWeight = LightPollutionWeight(alpha);
 
     NSMutableData *output = [NSMutableData dataWithLength:(NSUInteger)size.area() * 3 * sizeof(uint16_t)];
     uint16_t *out = (uint16_t *)output.mutableBytes;
     cv::parallel_for_(cv::Range(0, _height), [&](const cv::Range &rows) {
         for (int y = rows.start; y < rows.end; y++) {
             const cv::Vec3f *skyRow = sky.ptr<cv::Vec3f>(y), *groundRow = ground.ptr<cv::Vec3f>(y);
-            const cv::Vec3f *starRow = stars.ptr<cv::Vec3f>(y);
+            const cv::Vec3f *starRow = stars.ptr<cv::Vec3f>(y), *lightRow = lightPollution.ptr<cv::Vec3f>(y);
             const uchar *hasSkyRow = hasSky.ptr<uchar>(y), *hasGroundRow = hasGround.ptr<uchar>(y);
-            const float *a = alpha.ptr<float>(y), *seamRow = seam.ptr<float>(y);
+            const float *a = alpha.ptr<float>(y), *weightRow = lightPollutionWeight.ptr<float>(y);
             for (int x = 0; x < _width; x++) {
-                cv::Vec3f value = skyRow[x] * a[x] + groundRow[x] * (1.0f - a[x]);
-                if (seamRow[x] > 0 && hasGroundRow[x]) {
-                    // 継ぎ目: 星のない空（地上の層）と、それに空の層の星を重ねたものと比較明で合わせる
-                    cv::Vec3f lighter = groundRow[x];
-                    if (hasSkyRow[x] && a[x] > 0.02f) lighter += starRow[x];
-                    for (int c = 0; c < 3; c++) value[c] += seamRow[x] * std::max(0.0f, lighter[c] - value[c]);
+                // 空: 星に合わせた層に、星を重ねた光害フレームを比較明で合わせる
+                cv::Vec3f skyValue = skyRow[x];
+                if (weightRow[x] > 0 && hasGroundRow[x]) {
+                    cv::Vec3f lighter = lightRow[x];
+                    if (hasSkyRow[x]) lighter += starRow[x];
+                    for (int c = 0; c < 3; c++) skyValue[c] += weightRow[x] * std::max(0.0f, lighter[c] - skyValue[c]);
                 }
+                // 地上を一番上に重ねる（地上側は明るくしない・星を足さない）
+                const cv::Vec3f value = skyValue * a[x] + groundRow[x] * (1.0f - a[x]);
                 uint16_t *pixel = out + ((size_t)y * _width + x) * 3;
                 for (int c = 0; c < 3; c++) {
                     pixel[c] = (uint16_t)std::lround(std::min(65535.0f, std::max(0.0f, value[c])));

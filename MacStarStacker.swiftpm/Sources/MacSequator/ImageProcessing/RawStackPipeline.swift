@@ -27,6 +27,10 @@ struct RawStackResult {
     let previewImage: CGImage
     /// アプリ表示・TIFF/JPEG/FITS書き出し用の現像画像（撮影時の向き）
     let displayImage: NSImage
+    /// 新星景モードで自動判定した空の割合（センサーの向き、width*height、1=空）。分けて合成しなかった場合は nil
+    var skyAlpha: [Float]? = nil
+    /// 合成方法についての補足（新星景モードで分けて合成しなかった理由など）
+    var note: String? = nil
 
     var modeDescription: String {
         switch kind {
@@ -72,10 +76,15 @@ enum RawStackPipeline {
         let mode: Mode
         let align: Bool
         /// 空（青）と地上（緑）を塗り分けたマスク（表示中の画像の向き）
-        let skyGroundMask: NSImage?
+        var skyGroundMask: NSImage?
         let maskFeatherRadius: CGFloat
         /// 比較明の光跡除去: フレーム番号 → 光跡マスク（表示中の画像の向き）
         let trailMasks: [Int: [NSImage]]
+        /// 新星景モード（平均・中央値）: 空は星に、地上は地上に合わせて合成し、空と地上は自動で判定する。
+        /// skyGroundMask は判定の手がかり（塗った所だけ優先）として使う。比較明では使わない
+        var nightscape: Bool = false
+
+        var usesNightscape: Bool { nightscape && mode != .compareBright }
     }
 
     struct PipelineError: LocalizedError {
@@ -96,7 +105,8 @@ enum RawStackPipeline {
         for url in urls.dropFirst() {
             guard let info = try? RawDecoder.readInfo(from: url), info.isStackCompatible(with: first) else { return nil }
         }
-        return input.align ? .cameraRGB : .bayer
+        // 新星景モードは星と地上をそれぞれ位置合わせするため、常にカメラ色空間RGBで合成する
+        return (input.align || input.usesNightscape) ? .cameraRGB : .bayer
     }
 
     /// RAWのまま合成する。RAW経路の対象外（route が nil）の入力では nil を返す。
@@ -105,7 +115,7 @@ enum RawStackPipeline {
         let baseIndex = min(max(0, input.baseIndex), input.lights.count - 1)
         let firstInfo = try RawDecoder.readInfo(from: input.lights[0])
         try checkMemory(frameCount: input.lights.count, info: firstInfo, kind: kind,
-                        mode: input.mode, hasSkyGroundMask: input.skyGroundMask != nil)
+                        mode: input.mode, hasSkyGroundMask: input.skyGroundMask != nil, nightscape: input.usesNightscape)
 
         progress(0.02, "キャリブレーションフレームを構築中...")
         let darkMaster = try buildMaster(input.darks)
@@ -121,6 +131,8 @@ enum RawStackPipeline {
         switch kind {
         case .bayer:
             result = try stackBayer(input: input, info: info, calibrator: calibrator, pixelCount: pixelCount, progress: progress)
+        case .cameraRGB where input.usesNightscape:
+            result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
         case .cameraRGB:
             result = try stackCameraRGB(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
         }
@@ -130,8 +142,20 @@ enum RawStackPipeline {
     /// 中央値合成は全フレームを保持するため、搭載メモリに収まるかを事前に確認する。
     static func checkMemory(
         frameCount: Int, info: RawSensorInfo, kind: RawStackResult.Kind, mode: Mode, hasSkyGroundMask: Bool,
-        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
+        nightscape: Bool = false, physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) throws {
+        if nightscape {
+            // 新星景モードは外れ値を除くため、各フレームの輝度を2通り（星基準・地上基準）16bitで保持する
+            let required = UInt64(frameCount) * UInt64(info.width * info.height) * 2 * 2
+            if required > physicalMemory / 2 {
+                let gigabytes = String(format: "%.1f", Double(required) / 1_073_741_824)
+                throw PipelineError(
+                    message: "新星景モードに約\(gigabytes)GBのメモリが必要なため実行できません。枚数を減らしてください",
+                    allowsFallback: false
+                )
+            }
+            // 空と地上を分ける必要が無いときは通常の合成（中央値ならフレームを保持）になるため、続けて確認する
+        }
         guard mode == .median else { return }
         let samplesPerFrame = info.width * info.height * (kind == .cameraRGB ? 3 : 1)
         // 位置合わせありで空と地上を分けると、地上側（位置合わせ前）も別に中央値用に保持する
@@ -299,6 +323,93 @@ enum RawStackPipeline {
             whiteLevel: base.whiteLevel, baselineExposure: baseline,
             previewImage: rendered.preview, displayImage: rendered.display
         )
+    }
+
+    // MARK: - 新星景モード（空は星に、地上は地上に合わせる）
+
+    private static func stackNightscape(
+        input: Input,
+        baseIndex: Int,
+        info: RawSensorInfo,
+        calibrator: BayerCalibrator,
+        progress: Progress
+    ) throws -> RawStackResult {
+        func demosaic(_ index: Int) throws -> CameraRGBFrame {
+            let url = input.lights[index]
+            if calibrator.isIdentity { return try RawDecoder.demosaicCameraRGB(from: url) }
+            var bayer = try RawDecoder.readBayer(from: url)
+            try requireCompatible(bayer.info, info, url: url)
+            calibrator.apply(to: &bayer.pixels)
+            return try RawDecoder.demosaicCameraRGB(from: url, replacementBayer: bayer.pixels)
+        }
+
+        progress(0.04, "基準画像を現像中...")
+        let base = try demosaic(baseIndex)
+        let width = base.width, height = base.height
+        let hints = try input.skyGroundMask.flatMap { try nightscapeHints(mask: $0, info: info, width: width, height: height) }
+        // 2回目の読み込み（合成）で現像し直さないよう、メモリに余裕があれば現像したフレームを保持する
+        let frameBytes = UInt64(width * height * 3 * MemoryLayout<UInt16>.size)
+        let cacheFrames = UInt64(input.lights.count) * frameBytes <= ProcessInfo.processInfo.physicalMemory / 4
+
+        let outcome: NightscapeCompositor.Outcome
+        do {
+            outcome = try NightscapeCompositor.compose(
+                frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
+                cacheFrames: cacheFrames,
+                loadFrame: { index in
+                    if index == baseIndex { return base.pixels }
+                    let frame = try demosaic(index)
+                    guard frame.width == width, frame.height == height else {
+                        throw PipelineError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
+                    }
+                    return frame.pixels
+                },
+                progress: { fraction, status in progress(0.04 + fraction * 0.86, status) }
+            )
+        } catch let error as NightscapeCompositor.CompositorError {
+            throw PipelineError(message: error.message)
+        }
+
+        var note = input.mode == .median ? "新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました" : nil
+        switch outcome {
+        case .composited(let composited):
+            if composited.groundFallbackCount > 0 {
+                note = [note, "地上の位置合わせができなかった\(composited.groundFallbackCount)枚は、隣のフレームと同じ動きとして合成しました"]
+                    .compactMap { $0 }.joined(separator: "。")
+            }
+            progress(0.92, "RAWを現像してプレビューを作成中...")
+            let baseline = baselineExposure(for: input.lights[baseIndex])
+            let rendered = try render(kind: .cameraRGB, pixels: composited.pixels, info: base.info, width: width, height: height,
+                                      whiteLevel: base.whiteLevel, baselineExposure: baseline)
+            return RawStackResult(
+                kind: .cameraRGB, info: base.info, pixels: composited.pixels, width: width, height: height,
+                whiteLevel: base.whiteLevel, baselineExposure: baseline,
+                previewImage: rendered.preview, displayImage: rendered.display,
+                skyAlpha: composited.skyAlpha, note: note
+            )
+        case .notNeeded(let reason):
+            // 空と地上を分ける必要が無い（できない）ときは、星に合わせた通常の合成にする
+            var plain = input
+            plain.nightscape = false
+            plain.skyGroundMask = nil
+            var result = try stackCameraRGB(input: plain, baseIndex: baseIndex, info: info, calibrator: calibrator,
+                                            progress: { fraction, status in progress(0.5 + fraction * 0.5, status) })
+            result.note = reason
+            return result
+        }
+    }
+
+    /// 塗った空（青）・地上（緑）のマスクを、センサーの向き・解像度の新星景モードの手がかりにする
+    private static func nightscapeHints(mask: NSImage, info: RawSensorInfo, width: Int, height: Int) throws -> Data? {
+        guard width == info.width, height == info.height else { return nil }
+        let aligned = try sensorAlignedMask(mask, info: info)
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
+        rgba.withUnsafeMutableBytes { buffer in
+            context.render(aligned, toBitmap: buffer.baseAddress!, rowBytes: width * 4,
+                           bounds: CGRect(x: 0, y: 0, width: width, height: height), format: .RGBA8, colorSpace: nil)
+        }
+        return NightscapeCompositor.hints(fromRGBA: rgba, count: width * height)
     }
 
     /// 比較明合成で明るさを比べるときの色ごとの重み（撮影時ホワイトバランス係数の逆数）。
