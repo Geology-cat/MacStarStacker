@@ -22,7 +22,16 @@ struct TimelapseSettings {
     var fps: Double = 24.0
     var targetDuration: Double = 10.0       // Used when durationMode is .duration
     // ── Stabilization ─────────────────────────────────────────────────
-    var alignFrames: Bool = false           // 地上の風景で揺れを補正し、最初のフレームに揃える
+    var alignment: FrameAlignment = .none
+
+    /// 各フレームを何に合わせて位置合わせするか（どちらも最初のフレームに揃える）
+    enum FrameAlignment: String, CaseIterable {
+        case none   = "位置合わせなし"
+        /// 地上の風景に合わせる。手ぶれ・三脚のずれ・追尾撮影で動く地上を止め、星は日周運動で動く
+        case ground = "地上に合わせる（揺れ補正）"
+        /// 星に合わせる。星空を止め、地上が回転する
+        case stars  = "星に合わせる（星を固定）"
+    }
 
     // ── Deflicker ─────────────────────────────────────────────────────
     var deflicker: Bool = false     // normalize per-frame luminance to reduce flicker
@@ -217,8 +226,13 @@ class TimelapseExporter {
         let tFps = max(1.0, settings.effectiveFps)
         let frameDuration = CMTime(seconds: 1.0 / tFps, preferredTimescale: 60_000)
 
-        // 星（日周運動で動く）ではなく地上の風景で、隣り合うフレームを順に合わせて最初のフレームに揃える
-        let stabilizer = settings.alignFrames ? TimelapseStabilizer() : nil
+        // 隣り合うフレームを順に合わせて、最初のフレームに揃える
+        let stabilizer: TimelapseFrameAligner?
+        switch settings.alignment {
+        case .none:   stabilizer = nil
+        case .ground: stabilizer = TimelapseStabilizer()
+        case .stars:  stabilizer = StarTimelapseAligner()
+        }
         let identity: [NSNumber] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
         for (idx, file) in selectedFiles.enumerated() {
@@ -230,17 +244,15 @@ class TimelapseExporter {
                 throw ExportError(message: "画像を読み込めませんでした: \(file.name)")
             }
 
+            // フリッカー除去の明るさは、位置合わせで画像の端が黒くなる前の元画像で測る
+            var deflickerFactor: Double?
             if settings.deflicker, let ref = refLuminance {
                 let lum = averageLuminance(of: nsImage)
-                if lum > 0.001 {
-                    nsImage = scaleLuminance(image: nsImage, factor: ref / lum) ?? nsImage
-                }
+                if lum > 0.001 { deflickerFactor = ref / lum }
             }
 
-            if settings.autoStretch {
-                nsImage = applyStretch(to: nsImage, gamma: settings.gamma, ev: settings.exposure) ?? nsImage
-            }
-
+            // 位置合わせは明るさを持ち上げる前の元画像で行う（オートストレッチ後は夜空のノイズが強まり、
+            // 地上の模様の中の点を星と取り違えやすくなるため）
             if let stabilizer {
                 guard let targetURL = writeTemporaryTIFF(nsImage, prefix: "timelapse_align") else {
                     throw ExportError(message: "位置合わせ用画像を準備できませんでした: \(file.name)")
@@ -250,6 +262,14 @@ class TimelapseExporter {
                 if homography != identity {
                     nsImage = try ImageAligner.warpImage(at: targetURL, homography: homography)
                 }
+            }
+
+            if let deflickerFactor {
+                nsImage = scaleLuminance(image: nsImage, factor: deflickerFactor) ?? nsImage
+            }
+
+            if settings.autoStretch {
+                nsImage = applyStretch(to: nsImage, gamma: settings.gamma, ev: settings.exposure) ?? nsImage
             }
 
             guard let pixelBuffer = pixelBuffer(
@@ -289,7 +309,7 @@ class TimelapseExporter {
         let failed = stabilizer?.failedFrameCount ?? 0
         DispatchQueue.main.async {
             progress(1.0, failed > 0
-                ? "✅ タイムラプス書き出し完了（\(failed)フレームは揺れ補正できず、そのまま使用）"
+                ? "✅ タイムラプス書き出し完了（\(failed)フレームは位置合わせできず、そのまま使用）"
                 : "✅ タイムラプス書き出し完了！")
         }
     }
@@ -392,5 +412,62 @@ class TimelapseExporter {
         } catch {
             return nil
         }
+    }
+}
+
+// MARK: - フレームの位置合わせ
+
+/// タイムラプスの各フレームを、最初のフレームに揃える変換を順に求める
+protocol TimelapseFrameAligner: AnyObject {
+    /// 次のフレームを最初のフレームに揃える 3x3 ホモグラフィ（行優先9要素）
+    func homographyForImage(at url: URL) throws -> [NSNumber]
+    /// 位置合わせできず、前のフレームと同じ変換にしたフレームの数
+    var failedFrameCount: Int { get }
+}
+
+/// 地上の風景に合わせる（星の周りを除いた特徴点で、隣のフレームと順に合わせる）
+extension TimelapseStabilizer: TimelapseFrameAligner {}
+
+/// 星に合わせる。直前に星が見つかったフレームとの星の対応を順に積み重ねて、最初のフレームの星の位置に揃える。
+/// 数時間で星空が大きく回っても、隣のフレームとの差は小さいため合わせられる。
+final class StarTimelapseAligner: TimelapseFrameAligner {
+    /// 星が見つかった直前のフレームと、そのフレームを最初のフレームに揃える変換
+    private var reference: (aligner: StarAligner, homography: [Double])?
+    /// 直前の隣り合うフレーム間の変換（次のフレームの初期値にする）
+    private var lastStep: [NSNumber]?
+    private(set) var failedFrameCount = 0
+
+    func homographyForImage(at url: URL) throws -> [NSNumber] {
+        // 雲や薄明で星が見つからないフレームは基準にしない（次のフレームは、その前の星のあるフレームに合わせる）
+        let aligner = try? StarAligner(baseImageAt: url, skyMask: nil)
+        var current: [Double] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        if let reference {
+            current = reference.homography
+            if let step = try? reference.aligner.homographyForImage(at: url, initialGuess: lastStep) {
+                current = Self.multiply(reference.homography, step.map(\.doubleValue))
+                lastStep = step
+            } else {
+                failedFrameCount += 1
+            }
+        }
+        if let aligner {
+            reference = (aligner, current)
+        }
+        return current.map { NSNumber(value: $0) }
+    }
+
+    /// 行優先の 3x3 行列の積 a * b（b を先に適用する）
+    private static func multiply(_ a: [Double], _ b: [Double]) -> [Double] {
+        var result = [Double](repeating: 0, count: 9)
+        for row in 0..<3 {
+            for col in 0..<3 {
+                var sum = 0.0
+                for k in 0..<3 {
+                    sum += a[row * 3 + k] * b[k * 3 + col]
+                }
+                result[row * 3 + col] = sum
+            }
+        }
+        return result
     }
 }
