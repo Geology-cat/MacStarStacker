@@ -53,7 +53,7 @@ download() {
     local actual
     actual="$(shasum -a 256 "$file" | awk '{print $1}')"
     if [ "$actual" != "$sha" ]; then
-        echo "ERROR: $file のSHA-256が一致しません（期待: $sha / 実際: $actual）" >&2
+        echo "ERROR: $file のSHA-256が一致しません（期待: $sha / 実際: ${actual}）" >&2
         rm -f "$file"
         exit 1
     fi
@@ -80,7 +80,7 @@ for ARCH in "${ARCHS[@]}"; do
     MIN_VERSION="$(min_version_for "$ARCH")"
     BUILD="$WORK_DIR/opencv-build-$ARCH"
     INSTALL="$WORK_DIR/opencv-install-$ARCH"
-    echo "=== OpenCV $OPENCV_VERSION をビルド: $ARCH（macOS $MIN_VERSION 以降） ==="
+    echo "=== OpenCV $OPENCV_VERSION をビルド: ${ARCH}（macOS $MIN_VERSION 以降） ==="
     rm -rf "$BUILD" "$INSTALL"
     CROSS_ARGS=()
     if [ "$ARCH" != "$(uname -m)" ]; then
