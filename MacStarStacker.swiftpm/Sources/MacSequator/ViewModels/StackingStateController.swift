@@ -32,7 +32,8 @@ class StackingStateController {
     var baseImageMetadata: RawMetadataInfo? = nil
 
     // ── 設定 ──
-    var enableAutoStretch: Bool = true { didSet { if oldValue != enableAutoStretch { notifyStateChanged() } } }
+    /// Light画像を読み込んだ直後は撮って出しの明るさで確認できるよう、既定はOFF
+    var enableAutoStretch: Bool = false { didSet { if oldValue != enableAutoStretch { notifyStateChanged() } } }
     var enableAlignment: Bool = true { didSet { if oldValue != enableAlignment { notifyStateChanged() } } }
     var stackMode: String = "Average" { didSet { if oldValue != stackMode { notifyStateChanged() } } } // "Average", "Median", "Compare Bright"
     /// ON のときだけ空・地上マスクの編集と分離合成を有効にする。
