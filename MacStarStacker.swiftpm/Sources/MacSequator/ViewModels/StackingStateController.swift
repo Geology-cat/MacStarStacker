@@ -579,17 +579,32 @@ class StackingStateController {
                 }
                 defer { try? FileManager.default.removeItem(at: baseReferenceURL) }
 
+                // 地上の模様に引きずられないよう、星だけで位置合わせする
+                let starAligner: StarAligner
+                do {
+                    starAligner = try StarAligner(baseImageAt: baseReferenceURL, skyMask: nil)
+                } catch {
+                    self.finishStackingWithError("星の位置合わせを準備できませんでした（\(error.localizedDescription)）")
+                    return
+                }
+                // 直前のフレームの変換を初期値にする（隣り合うフレームほど星の動きが近い）
+                var previousHomography: [NSNumber]?
+
                 skyFrames.removeAll(keepingCapacity: true)
                 for (i, frame) in calibratedFrames.enumerated() {
                     if frame.file.id == base.id {
                         skyFrames.append(frame.image)
+                        previousHomography = [1, 0, 0, 0, 1, 0, 0, 0, 1]
                     } else {
                         guard let targetURL = self.writeTemporaryTIFF(frame.image, prefix: "align") else {
                             self.finishStackingWithError("位置合わせ用画像を準備できませんでした: \(frame.file.name)")
                             return
                         }
                         do {
-                            let aligned = try ImageAligner.alignImage(at: targetURL, toBaseImageAt: baseReferenceURL)
+                            let homography = try starAligner.homographyForImage(at: targetURL,
+                                                                         initialGuess: previousHomography)
+                            previousHomography = homography
+                            let aligned = try ImageAligner.warpImage(at: targetURL, homography: homography)
                             skyFrames.append(aligned)
                             try? FileManager.default.removeItem(at: targetURL)
                         } catch {
