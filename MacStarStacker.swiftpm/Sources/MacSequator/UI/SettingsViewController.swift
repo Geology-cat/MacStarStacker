@@ -99,8 +99,10 @@ public class SettingsViewController: NSViewController {
     private let frameRangeLabel = NSTextField(labelWithString: "")
     private let durationModeSegmented = NSSegmentedControl()
     private let fpsSlider = NSSlider(value: 24, minValue: 1, maxValue: 120, target: nil, action: nil)
-    private let fpsLabel = NSTextField(labelWithString: "24 fps")
-    private let alignTimelapseCheckbox = NSButton(checkboxWithTitle: "アライメント (位置合わせ)", target: nil, action: nil)
+    /// 再生速度（fps または秒数）を直接入力する欄と単位
+    private let speedField = NSTextField(string: "24")
+    private let speedUnitLabel = NSTextField(labelWithString: "fps")
+    private let timelapseAlignPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let deflickerCheckbox = NSButton(checkboxWithTitle: "フリッカー除去 (輝度均一化)", target: nil, action: nil)
     private let autoStretchTimelapseCheckbox = NSButton(checkboxWithTitle: "オートストレッチ", target: nil, action: nil)
     private let resolutionPopup = NSPopUpButton()
@@ -537,13 +539,26 @@ public class SettingsViewController: NSViewController {
         fpsSlider.target = self
         fpsSlider.action = #selector(onPlaybackSpeedChanged)
 
-        fpsLabel.translatesAutoresizingMaskIntoConstraints = false
-        fpsLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        fpsLabel.alignment = .right
+        speedField.translatesAutoresizingMaskIntoConstraints = false
+        speedField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        speedField.alignment = .right
+        let speedFormatter = NumberFormatter()
+        speedFormatter.numberStyle = .decimal
+        speedFormatter.usesGroupingSeparator = false
+        speedFormatter.maximumFractionDigits = 2
+        speedField.formatter = speedFormatter
+        speedField.target = self
+        speedField.action = #selector(onSpeedFieldEntered)
+        speedField.toolTip = "数値を入力して Return で確定します"
+
+        speedUnitLabel.translatesAutoresizingMaskIntoConstraints = false
+        speedUnitLabel.font = NSFont.systemFont(ofSize: 10)
+        speedUnitLabel.textColor = .secondaryLabelColor
 
         speedCard.container.addSubview(durationModeSegmented)
         speedCard.container.addSubview(fpsSlider)
-        speedCard.container.addSubview(fpsLabel)
+        speedCard.container.addSubview(speedField)
+        speedCard.container.addSubview(speedUnitLabel)
 
         NSLayoutConstraint.activate([
             durationModeSegmented.topAnchor.constraint(equalTo: speedCard.container.topAnchor),
@@ -552,19 +567,42 @@ public class SettingsViewController: NSViewController {
 
             fpsSlider.topAnchor.constraint(equalTo: durationModeSegmented.bottomAnchor, constant: 8),
             fpsSlider.leadingAnchor.constraint(equalTo: speedCard.container.leadingAnchor),
-            fpsSlider.trailingAnchor.constraint(equalTo: fpsLabel.leadingAnchor, constant: -6),
+            fpsSlider.trailingAnchor.constraint(equalTo: speedField.leadingAnchor, constant: -6),
 
-            fpsLabel.trailingAnchor.constraint(equalTo: speedCard.container.trailingAnchor),
-            fpsLabel.centerYAnchor.constraint(equalTo: fpsSlider.centerYAnchor),
-            fpsLabel.widthAnchor.constraint(equalToConstant: 45),
+            speedField.trailingAnchor.constraint(equalTo: speedUnitLabel.leadingAnchor, constant: -3),
+            speedField.centerYAnchor.constraint(equalTo: fpsSlider.centerYAnchor),
+            speedField.widthAnchor.constraint(equalToConstant: 52),
+
+            speedUnitLabel.trailingAnchor.constraint(equalTo: speedCard.container.trailingAnchor),
+            speedUnitLabel.centerYAnchor.constraint(equalTo: fpsSlider.centerYAnchor),
+            speedUnitLabel.widthAnchor.constraint(equalToConstant: 22),
             fpsSlider.bottomAnchor.constraint(equalTo: speedCard.container.bottomAnchor),
         ])
 
         // カード3: 補正 & 画質
         let procCard = SectionCardView(title: "補正 & 画質")
-        alignTimelapseCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        alignTimelapseCheckbox.target = self
-        alignTimelapseCheckbox.action = #selector(onTimelapseSettingChanged)
+        // 位置合わせ（なし / 地上に合わせる / 星に合わせる）
+        let alignTitle = NSTextField(labelWithString: "位置合わせ:")
+        alignTitle.translatesAutoresizingMaskIntoConstraints = false
+        alignTitle.font = NSFont.systemFont(ofSize: 11)
+        timelapseAlignPopup.translatesAutoresizingMaskIntoConstraints = false
+        timelapseAlignPopup.addItems(withTitles: TimelapseSettings.FrameAlignment.allCases.map(\.rawValue))
+        timelapseAlignPopup.toolTip = "地上に合わせる: 手ぶれ・追尾で動く地上を止めます（星は動きます）\n星に合わせる: 星空を止めます（地上が回ります）"
+        timelapseAlignPopup.target = self
+        timelapseAlignPopup.action = #selector(onTimelapseSettingChanged)
+        let alignRow = NSView()
+        alignRow.translatesAutoresizingMaskIntoConstraints = false
+        alignRow.addSubview(alignTitle)
+        alignRow.addSubview(timelapseAlignPopup)
+        NSLayoutConstraint.activate([
+            alignTitle.leadingAnchor.constraint(equalTo: alignRow.leadingAnchor),
+            alignTitle.centerYAnchor.constraint(equalTo: timelapseAlignPopup.centerYAnchor),
+            timelapseAlignPopup.topAnchor.constraint(equalTo: alignRow.topAnchor),
+            timelapseAlignPopup.bottomAnchor.constraint(equalTo: alignRow.bottomAnchor),
+            timelapseAlignPopup.leadingAnchor.constraint(equalTo: alignTitle.trailingAnchor, constant: 4),
+            timelapseAlignPopup.trailingAnchor.constraint(equalTo: alignRow.trailingAnchor),
+        ])
+        alignTitle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         deflickerCheckbox.translatesAutoresizingMaskIntoConstraints = false
         deflickerCheckbox.target = self
@@ -584,18 +622,18 @@ public class SettingsViewController: NSViewController {
         codecPopup.target = self
         codecPopup.action = #selector(onTimelapseSettingChanged)
 
-        procCard.container.addSubview(alignTimelapseCheckbox)
+        procCard.container.addSubview(alignRow)
         procCard.container.addSubview(deflickerCheckbox)
         procCard.container.addSubview(autoStretchTimelapseCheckbox)
         procCard.container.addSubview(resolutionPopup)
         procCard.container.addSubview(codecPopup)
 
         NSLayoutConstraint.activate([
-            alignTimelapseCheckbox.topAnchor.constraint(equalTo: procCard.container.topAnchor),
-            alignTimelapseCheckbox.leadingAnchor.constraint(equalTo: procCard.container.leadingAnchor),
-            alignTimelapseCheckbox.trailingAnchor.constraint(equalTo: procCard.container.trailingAnchor),
+            alignRow.topAnchor.constraint(equalTo: procCard.container.topAnchor),
+            alignRow.leadingAnchor.constraint(equalTo: procCard.container.leadingAnchor),
+            alignRow.trailingAnchor.constraint(equalTo: procCard.container.trailingAnchor),
 
-            deflickerCheckbox.topAnchor.constraint(equalTo: alignTimelapseCheckbox.bottomAnchor, constant: 6),
+            deflickerCheckbox.topAnchor.constraint(equalTo: alignRow.bottomAnchor, constant: 8),
             deflickerCheckbox.leadingAnchor.constraint(equalTo: procCard.container.leadingAnchor),
             deflickerCheckbox.trailingAnchor.constraint(equalTo: procCard.container.trailingAnchor),
 
@@ -794,7 +832,10 @@ public class SettingsViewController: NSViewController {
         startFrameSlider.doubleValue = Double(min(state.timelapseSettings.startFrame, maxFrames - 1))
         endFrameSlider.doubleValue = Double(min(state.timelapseSettings.endFrame, maxFrames - 1))
         durationModeSegmented.selectedSegment = state.timelapseSettings.durationMode == .fps ? 0 : 1
-        alignTimelapseCheckbox.state = state.timelapseSettings.alignFrames ? .on : .off
+        if let alignIndex = TimelapseSettings.FrameAlignment.allCases.firstIndex(of: state.timelapseSettings.alignment),
+           timelapseAlignPopup.indexOfSelectedItem != alignIndex {
+            timelapseAlignPopup.selectItem(at: alignIndex)
+        }
         deflickerCheckbox.state = state.timelapseSettings.deflicker ? .on : .off
         autoStretchTimelapseCheckbox.state = state.timelapseSettings.autoStretch ? .on : .off
         let resolutionIndex: Int
@@ -815,13 +856,13 @@ public class SettingsViewController: NSViewController {
             fpsSlider.minValue = 1
             fpsSlider.maxValue = 120
             fpsSlider.doubleValue = state.timelapseSettings.effectiveFps
-            fpsLabel.stringValue = "\(Int(round(state.timelapseSettings.effectiveFps))) fps"
+            showSpeed(state.timelapseSettings.effectiveFps, unit: "fps")
         } else {
             let minimumDuration = max(1.0, ceil(Double(state.timelapseSettings.effectiveFrameCount) / 120.0))
             fpsSlider.minValue = minimumDuration
             fpsSlider.maxValue = max(600, minimumDuration)
             fpsSlider.doubleValue = max(minimumDuration, state.timelapseSettings.targetDuration)
-            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) 秒"
+            showSpeed(fpsSlider.doubleValue, unit: "秒")
         }
         frameRangeLabel.stringValue = "フレーム数: \(state.timelapseSettings.effectiveFrameCount) / 推定: \(String(format: "%.1f", state.timelapseSettings.estimatedDuration))秒"
         startTimelapseButton.isEnabled = !state.isExportingTimelapse && lightCount > 0
@@ -989,18 +1030,37 @@ public class SettingsViewController: NSViewController {
     @objc private func onPlaybackSpeedChanged() {
         let state = StackingStateController.shared
         if state.timelapseSettings.durationMode == .fps {
-            state.timelapseSettings.fps = fpsSlider.doubleValue
-            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) fps"
+            // スライダーは整数に丸める（小数は入力欄から指定する）
+            state.timelapseSettings.fps = fpsSlider.doubleValue.rounded()
         } else {
-            state.timelapseSettings.targetDuration = fpsSlider.doubleValue
-            fpsLabel.stringValue = "\(Int(round(fpsSlider.doubleValue))) 秒"
+            state.timelapseSettings.targetDuration = fpsSlider.doubleValue.rounded()
         }
         updateUI()
     }
 
+    /// 入力欄の値をスライダーの範囲に収めて反映する（Return または入力欄から離れたとき）
+    @objc private func onSpeedFieldEntered() {
+        let state = StackingStateController.shared
+        let value = min(fpsSlider.maxValue, max(fpsSlider.minValue, speedField.doubleValue))
+        if state.timelapseSettings.durationMode == .fps {
+            state.timelapseSettings.fps = value
+        } else {
+            state.timelapseSettings.targetDuration = value
+        }
+        updateUI()
+    }
+
+    /// 入力中の値は上書きしない
+    private func showSpeed(_ value: Double, unit: String) {
+        speedUnitLabel.stringValue = unit
+        guard speedField.currentEditor() == nil else { return }
+        speedField.doubleValue = (value * 100).rounded() / 100
+    }
+
     @objc private func onTimelapseSettingChanged() {
         var settings = StackingStateController.shared.timelapseSettings
-        settings.alignFrames = (alignTimelapseCheckbox.state == .on)
+        let alignIndex = max(0, timelapseAlignPopup.indexOfSelectedItem)
+        settings.alignment = TimelapseSettings.FrameAlignment.allCases[min(alignIndex, TimelapseSettings.FrameAlignment.allCases.count - 1)]
         settings.deflicker = (deflickerCheckbox.state == .on)
         settings.autoStretch = (autoStretchTimelapseCheckbox.state == .on)
         switch resolutionPopup.indexOfSelectedItem {
