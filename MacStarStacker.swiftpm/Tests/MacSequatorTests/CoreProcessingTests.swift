@@ -510,7 +510,7 @@ final class CoreProcessingTests: XCTestCase {
         state.enableSkyGroundMask = true
         state.stackMode = "Median"
         state.enableAlignment = false
-        state.enableAutoStretch = false
+        state.enableAutoStretch = true
         state.brushSize = 99
         state.maskFeatherRadius = 55
         state.brushMode = .erase
