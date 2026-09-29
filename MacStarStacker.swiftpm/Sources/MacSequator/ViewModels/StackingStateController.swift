@@ -318,22 +318,8 @@ class StackingStateController {
         guard let original = ImageLoader.load(from: file.url) else { return nil }
         guard enableAutoStretch else { return original }
 
-        let ci = CIImage(contentsOf: file.url)
-            ?? original.cgImage(forProposedRect: nil, context: nil, hints: nil).map(CIImage.init(cgImage:))
-        guard let ci else { return original }
-        guard let gammaFilter = CIFilter(name: "CIGammaAdjust") else { return original }
-        gammaFilter.setValue(ci, forKey: kCIInputImageKey)
-        gammaFilter.setValue(0.45, forKey: "inputPower")
-        guard let gammaOut = gammaFilter.outputImage else { return original }
-
-        guard let expFilter = CIFilter(name: "CIExposureAdjust") else { return original }
-        expFilter.setValue(gammaOut, forKey: kCIInputImageKey)
-        expFilter.setValue(1.0, forKey: "inputEV")
-        guard let out = expFilter.outputImage else { return original }
-
-        let ctx = CIContext()
-        guard let cg = ctx.createCGImage(out, from: out.extent) else { return original }
-        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        // 画像の明るさの分布に合わせて暗部を持ち上げる（固定のガンマ・露出補正では明るくなりすぎる）
+        return AutoStretch.stretch(original) ?? original
     }
 
     // MARK: - スタッキングパイプライン
