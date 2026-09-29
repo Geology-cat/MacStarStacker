@@ -5,7 +5,10 @@ set -euo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$PROJ_DIR/../dist"
-BUILD_DIR="$PROJ_DIR/.build/release"
+# Package.swift の deploymentTarget と合わせる
+DEPLOYMENT_TARGET="14.0"
+ARCHS=(arm64 x86_64)
+BUILD_DIR="$PROJ_DIR/.build/apple/Products/Release"
 APP_NAME="MacStarStacker"          # display name of the .app
 BIN_NAME="MacSequator"             # SPM executable product name
 APP_DIR="$DIST_DIR/${APP_NAME}.app"
@@ -16,18 +19,23 @@ BIN_SRC="$BUILD_DIR/$BIN_NAME"
 BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
 INFO_PLIST="$PROJ_DIR/Sources/MacSequator/Info.plist"
 ICNS_SRC="$PROJ_DIR/Sources/MacSequator/AppIcon.icns"
-BUILD_ARCH="$(uname -m)"
 
-echo "=== Building release binary ==="
+echo "=== Building dependencies (OpenCV / LibRaw) ==="
+bash "$PROJ_DIR/../scripts/build_deps.sh" "$DEPLOYMENT_TARGET"
+
+echo "=== Building release binary (${ARCHS[*]}) ==="
 cd "$PROJ_DIR"
-swift build -c release
+ARCH_ARGS=()
+for ARCH in "${ARCHS[@]}"; do
+    ARCH_ARGS+=(--arch "$ARCH")
+done
+swift build -c release "${ARCH_ARGS[@]}"
 
 echo "=== Assembling .app bundle in dist/ ==="
 mkdir -p "$DIST_DIR"
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS/MacOS"
 mkdir -p "$CONTENTS/Resources"
-mkdir -p "$CONTENTS/Frameworks"
 
 # 1. Copy binary (place it in MacOS/ as the app display name)
 cp "$BIN_SRC" "$CONTENTS/MacOS/$APP_NAME"
@@ -46,116 +54,21 @@ if [ -f "$ICNS_SRC" ]; then
     echo "Icon: AppIcon.icns copied"
 fi
 
-# 5. Homebrew/OpenCV の非システム依存ライブラリを再帰的に同梱
-OPENCV_LIB_DIR="$(pkg-config --variable=libdir opencv4 2>/dev/null || echo '/usr/local/opt/opencv/lib')"
-BREW_PREFIX="$(brew --prefix 2>/dev/null || dirname "$(dirname "$OPENCV_LIB_DIR")")"
-echo "=== Bundling non-system dylibs from $BREW_PREFIX ==="
-
-REQUIRED_MODULES=("core" "imgproc" "imgcodecs" "features2d" "calib3d" "flann" "photo")
-
-for MOD in "${REQUIRED_MODULES[@]}"; do
-    DYLIB="$(find "$OPENCV_LIB_DIR" -maxdepth 1 -name "libopencv_${MOD}.*.dylib" -print | sort | tail -1)"
-    if [ -z "$DYLIB" ]; then
-        echo "ERROR: OpenCV module not found: $MOD" >&2
+# 5. 依存ライブラリは静的リンクのため、システム外のdylibを参照していないこと・全アーキテクチャを含むことを確認
+EXTERNAL_DYLIBS="$(otool -L "$CONTENTS/MacOS/$APP_NAME" | tail -n +2 | awk '{print $1}' \
+    | grep -vE '^(/System/|/usr/lib/)' || true)"
+if [ -n "$EXTERNAL_DYLIBS" ]; then
+    echo "ERROR: System-external libraries are referenced:" >&2
+    echo "$EXTERNAL_DYLIBS" >&2
+    exit 1
+fi
+for ARCH in "${ARCHS[@]}"; do
+    if ! lipo "$CONTENTS/MacOS/$APP_NAME" -verify_arch "$ARCH"; then
+        echo "ERROR: $ARCH slice is missing" >&2
         exit 1
     fi
-    cp -L "$DYLIB" "$CONTENTS/Frameworks/$(basename "$DYLIB")"
 done
-
-BREW_DYLIB_INDEX="$PROJ_DIR/.build/brew_dylib_index.txt"
-find -L "$BREW_PREFIX/opt" -type f -name '*.dylib' -print > "$BREW_DYLIB_INDEX"
-
-resolve_dependency() {
-    local dep="$1"
-    local basename_dep
-    basename_dep="$(basename "$dep")"
-
-    if [[ "$dep" == /* ]] && [ -f "$dep" ]; then
-        printf '%s\n' "$dep"
-        return 0
-    fi
-    if [[ "$dep" == @rpath/* ]]; then
-        # 事前作成した索引を使い、間接依存ごとのHomebrew全探索を避ける。
-        awk -v suffix="/lib/$basename_dep" 'index($0, suffix) == length($0) - length(suffix) + 1 { print; exit }' "$BREW_DYLIB_INDEX"
-        return 0
-    fi
-    return 1
-}
-
-# 新しい依存が見つからなくなるまで、コピーと参照書き換えを繰り返す。
-while :; do
-    BEFORE_COUNT="$(find "$CONTENTS/Frameworks" -maxdepth 1 -type f | wc -l | tr -d ' ')"
-    TARGETS=("$CONTENTS/MacOS/$APP_NAME")
-    while IFS= read -r FRAMEWORK_DYLIB; do
-        TARGETS+=("$FRAMEWORK_DYLIB")
-    done < <(find "$CONTENTS/Frameworks" -maxdepth 1 -type f -name '*.dylib' -print | sort)
-
-    for TARGET in "${TARGETS[@]}"; do
-        while IFS= read -r DEP; do
-            case "$DEP" in
-                /System/*|/usr/lib/*) continue ;;
-            esac
-
-            SRC="$(resolve_dependency "$DEP" || true)"
-            [ -n "$SRC" ] || continue
-            DEP_BASENAME="$(basename "$SRC")"
-            DEST="$CONTENTS/Frameworks/$DEP_BASENAME"
-            if [ ! -f "$DEST" ]; then
-                cp -L "$SRC" "$DEST"
-                chmod 755 "$DEST"
-            fi
-
-            if [ "$TARGET" = "$CONTENTS/MacOS/$APP_NAME" ]; then
-                NEW_DEP="@executable_path/../Frameworks/$DEP_BASENAME"
-            else
-                NEW_DEP="@loader_path/$DEP_BASENAME"
-            fi
-            install_name_tool -change "$DEP" "$NEW_DEP" "$TARGET"
-        done < <(otool -L "$TARGET" | tail -n +2 | awk '{print $1}')
-    done
-
-    AFTER_COUNT="$(find "$CONTENTS/Frameworks" -maxdepth 1 -type f | wc -l | tr -d ' ')"
-    [ "$BEFORE_COUNT" = "$AFTER_COUNT" ] && break
-done
-
-for DYLIB_FILE in "$CONTENTS/Frameworks"/*.dylib; do
-    install_name_tool -id "@rpath/$(basename "$DYLIB_FILE")" "$DYLIB_FILE"
-done
-
-install_name_tool -add_rpath "@executable_path/../Frameworks" "$CONTENTS/MacOS/$APP_NAME" 2>/dev/null || true
-
-UNBUNDLED="$(
-    find "$CONTENTS/MacOS" "$CONTENTS/Frameworks" -type f -perm -111 -print0 |
-    while IFS= read -r -d '' TARGET; do
-        otool -L "$TARGET" 2>/dev/null | tail -n +2 | awk '{print $1}'
-    done | grep -E '^(/usr/local|/opt/homebrew)/' || true
-)"
-if [ -n "$UNBUNDLED" ]; then
-    echo "ERROR: Unbundled libraries remain:" >&2
-    echo "$UNBUNDLED" >&2
-    exit 1
-fi
-
-UNRESOLVED_RPATH="$(
-    find "$CONTENTS/MacOS" "$CONTENTS/Frameworks" -type f -perm -111 -print0 |
-    while IFS= read -r -d '' TARGET; do
-        TARGET_BASENAME="$(basename "$TARGET")"
-        while IFS= read -r DEP; do
-            [[ "$DEP" == @rpath/* ]] || continue
-            DEP_BASENAME="$(basename "$DEP")"
-            # dylib自身のLC_ID_DYLIBと、OSが供給するSwiftランタイムは除外する。
-            [ "$DEP_BASENAME" = "$TARGET_BASENAME" ] && continue
-            [ -f "$CONTENTS/Frameworks/$DEP_BASENAME" ] && continue
-            [ -f "/usr/lib/swift/$DEP_BASENAME" ] && continue
-            printf '%s -> %s\n' "$TARGET_BASENAME" "$DEP"
-        done < <(otool -L "$TARGET" 2>/dev/null | tail -n +2 | awk '{print $1}')
-    done
-)"
-if [ -n "$UNRESOLVED_RPATH" ]; then
-    echo "ERROR: Unresolved @rpath libraries remain:" >&2
-    echo "$UNRESOLVED_RPATH" >&2
-    exit 1
-fi
+echo "Architectures: $(lipo -archs "$CONTENTS/MacOS/$APP_NAME")"
 
 # 6. 隔離属性を除去し、アドホック署名を付与
 xattr -cr "$APP_DIR" 2>/dev/null || true
@@ -185,7 +98,7 @@ MacStarStacker インストール＆初回起動ガイド
 警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
 
 対応OS: macOS 14 (Sonoma) 以降
-収録アーキテクチャ: ${BUILD_ARCH}（Universalバイナリではありません）
+収録アーキテクチャ: Universal（Apple Silicon / Intel のどちらでもネイティブ動作）
 EOF
 
 # 8. Create DMG package

@@ -4,7 +4,9 @@
 Windows用ソフトウェア「Sequator」のように、星の日周運動を追尾しながら地上の風景を固定して合成する「空と地上の分離」スタッキングを実現します。
 
 macOS 14 (Sonoma) 以降に対応しています（macOS 15.7でビルド・検証）。
-現在同梱しているDMGはx86_64版です。Intel Macではネイティブ、Apple Silicon MacではRosetta 2経由で動作します。
+配布DMGはUniversal版（Apple Silicon / Intel のどちらでもネイティブ動作）です。
+
+> macOS 10.13 (High Sierra) 以降に対応した版は `macos10.13` ブランチで開発しています。
 
 ---
 
@@ -47,10 +49,11 @@ MacStarStacker/
 │   ├── インストールと初回起動ガイド.pdf  # PDF形式ガイド
 │   └── assets/                        # アイコン・画像素材
 ├── scripts/                           # 補助スクリプト
-│   └── fix_dylib_bundling.py
+│   └── build_deps.sh                  # OpenCV・LibRawをUniversal静的ライブラリとしてビルド
 ├── MacStarStacker.swiftpm/            # Swift/C++ ソースコード & ビルド設定
 │   ├── Package.swift
 │   ├── build_app.sh                   # dist/ にビルド・パッケージングするスクリプト
+│   ├── Vendor/                        # build_deps.sh の出力先（Git管理外）
 │   └── Sources/
 │       ├── MacSequator/               # AppKit UI, コントローラ, 画像処理エンジン
 │       ├── OpenCVWrapper/             # OpenCV C++ アライメントラッパー
@@ -65,11 +68,19 @@ MacStarStacker/
 
 ### 前提条件
 - macOS 14 以降
-- 現在の配布DMG: x86_64（Apple SiliconではRosetta 2が必要）
-- Xcode Command Line Tools (`xcode-select --install`)
-- OpenCV 4系 (Homebrew): `brew install opencv@4`（Homebrew の `opencv` が4系の環境ではそれも使用可。OpenCV 5系は未対応）
-- LibRaw (Homebrew): `brew install libraw`（RAWをベイヤー配列・カメラ色空間のまま合成するために使用）
+- Xcode 16 以降（`xcode-select` でXcode本体を選択しておく）
+- CMake・Ninja（依存ライブラリのビルド用）: `brew install cmake ninja`
 - ExifTool (推奨): `brew install exiftool`
+
+OpenCV 4.13.0 と LibRaw 0.22.2 は、`scripts/build_deps.sh` が公式GitHubからソースを取得し、
+Universal（x86_64 + arm64）の静的ライブラリとして `MacStarStacker.swiftpm/Vendor/` にビルドします
+（初回のみ数分〜十数分。以降はビルド済みのものを再利用）。Homebrew版のOpenCV・LibRawは使いません。
+
+### 開発時のビルド・テスト
+```bash
+scripts/build_deps.sh 14.0
+swift test --package-path MacStarStacker.swiftpm
+```
 
 ### アプリケーションおよびDMGのビルド
 ```bash

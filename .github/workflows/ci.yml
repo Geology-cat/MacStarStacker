@@ -17,7 +17,7 @@ concurrency:
 jobs:
   test:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: ソースを取得
@@ -38,13 +38,28 @@ jobs:
             exit 1
           fi
 
-      - name: OpenCVとLibRawを準備
+      - name: ビルドツールを準備
         shell: bash
         run: |
           # macOSランナーに残る未信頼の外部tapを外し、Homebrewの警告を防ぐ。
           brew untap aws/tap 2>/dev/null || true
-          # Homebrew の opencv は5系になったため、4系（opencv@4）を入れる
-          brew install opencv@4 libraw pkg-config
+          brew install cmake ninja
+
+      - name: 最低対応OSを取得
+        id: target
+        shell: bash
+        run: |
+          echo "version=$(sed -n 's/^let deploymentTarget = "\(.*\)"$/\1/p' MacStarStacker.swiftpm/Package.swift)" >> "$GITHUB_OUTPUT"
+
+      # OpenCV・LibRawのビルドには時間がかかるため、スクリプトと最低対応OSが変わらない限りキャッシュを使う
+      - name: 依存ライブラリのキャッシュを復元
+        uses: actions/cache@v5
+        with:
+          path: MacStarStacker.swiftpm/Vendor
+          key: vendor-${{ runner.os }}-macos${{ steps.target.outputs.version }}-${{ hashFiles('scripts/build_deps.sh') }}
+
+      - name: OpenCVとLibRawをビルド
+        run: bash scripts/build_deps.sh "${{ steps.target.outputs.version }}"
 
       - name: 全テストを実行
         run: swift test --package-path MacStarStacker.swiftpm

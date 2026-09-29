@@ -8,6 +8,9 @@
 .build/
 .swiftpm/
 DerivedData/
+
+# scripts/build_deps.sh でビルドする依存ライブラリ（OpenCV・LibRaw）
+MacStarStacker.swiftpm/Vendor/
 *.xcuserstate
 *.xcuserdata/
 

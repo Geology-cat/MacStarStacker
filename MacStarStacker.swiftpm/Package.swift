@@ -1,19 +1,11 @@
 // swift-tools-version: 5.9
 import PackageDescription
-import Foundation
 
-#if arch(arm64)
-let homebrewPrefix = "/opt/homebrew/opt"
-#else
-let homebrewPrefix = "/usr/local/opt"
-#endif
-
-// OpenCV 5 はヘッダー配置とモジュール構成（calib3d の分割など）が変わったため、4系を使う。
-// Homebrew の opencv が5系になった環境では opencv@4（keg-only）を優先する。
-let opencvPrefix = FileManager.default.fileExists(atPath: "\(homebrewPrefix)/opencv@4/include/opencv4")
-    ? "\(homebrewPrefix)/opencv@4"
-    : "\(homebrewPrefix)/opencv"
-let librawPrefix = "\(homebrewPrefix)/libraw"
+// OpenCV・LibRaw は scripts/build_deps.sh でソースからビルドした Universal 静的ライブラリを使う。
+// （Homebrew の dylib はビルドしたMacのOSが最低対応OSになり、アーキテクチャも1種類しか含まないため）
+// 最低対応OSを変えるときは、ここと Info.plist の LSMinimumSystemVersion、build_app.sh を合わせる。
+let deploymentTarget = "14.0"
+let vendorDir = "\(Context.packageDirectory)/Vendor/macos\(deploymentTarget)"
 
 let package = Package(
     name: "MacSequator",
@@ -35,34 +27,41 @@ let package = Package(
             cxxSettings: [
                 .unsafeFlags([
                     "-std=c++17",
-                    "-I\(opencvPrefix)/include/opencv4"
+                    "-I\(vendorDir)/include/opencv4"
                 ], .when(platforms: [.macOS]))
             ],
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(opencvPrefix)/lib",
-                    "-lopencv_core",
-                    "-lopencv_imgproc",
-                    "-lopencv_imgcodecs",
-                    "-lopencv_features2d",
+                    "-L\(vendorDir)/lib",
+                    "-lopencv_photo",
                     "-lopencv_calib3d",
+                    "-lopencv_features2d",
                     "-lopencv_flann",
-                    "-lopencv_photo"
+                    "-lopencv_imgcodecs",
+                    "-lopencv_imgproc",
+                    "-lopencv_core",
+                    // imgcodecs が同梱する画像コーデック（OpenCV付属のソースからビルド）
+                    "-llibjpeg-turbo",
+                    "-llibpng",
+                    "-llibtiff",
+                    "-lz"
                 ], .when(platforms: [.macOS]))
             ]
         ),
-        // RAWのベイヤー配列・カメラ色空間データを読むためのLibRawブリッジ（brew install libraw）
+        // RAWのベイヤー配列・カメラ色空間データを読むためのLibRawブリッジ
         .target(
             name: "LibRawBridge",
             dependencies: [],
             path: "Sources/LibRawBridge",
             cSettings: [
-                .unsafeFlags(["-I\(librawPrefix)/include/libraw"], .when(platforms: [.macOS]))
+                .unsafeFlags(["-I\(vendorDir)/include/libraw"], .when(platforms: [.macOS]))
             ],
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(librawPrefix)/lib",
-                    "-lraw_r"
+                    "-L\(vendorDir)/lib",
+                    "-lraw_r",
+                    "-lz",
+                    "-lc++"
                 ], .when(platforms: [.macOS]))
             ]
         ),
