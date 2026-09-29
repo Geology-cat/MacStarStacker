@@ -54,6 +54,12 @@ public class SettingsViewController: NSViewController {
 
     private let stackViewContainer = NSView()
     private let timelapseViewContainer = NSView()
+    /// 表示中のタブだけをスクロール範囲の下端に固定する。両方を固定すると、背の低いタブが
+    /// もう一方の高さまで引き伸ばされ、チェックボックスなどの間に余白ができる。
+    private lazy var stackBottomConstraint = stackViewContainer.bottomAnchor.constraint(
+        equalTo: documentView.bottomAnchor, constant: -16)
+    private lazy var timelapseBottomConstraint = timelapseViewContainer.bottomAnchor.constraint(
+        equalTo: documentView.bottomAnchor, constant: -16)
 
     // ── スタック設定コントロール ──
     private let stackModePopup = NSPopUpButton()
@@ -201,13 +207,12 @@ public class SettingsViewController: NSViewController {
             stackViewContainer.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 4),
             stackViewContainer.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 10),
             stackViewContainer.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -10),
-            stackViewContainer.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -16),
+            stackBottomConstraint,
 
             // Timelapse Container
             timelapseViewContainer.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 4),
             timelapseViewContainer.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 10),
             timelapseViewContainer.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -10),
-            timelapseViewContainer.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -16),
         ])
     }
 
@@ -244,35 +249,13 @@ public class SettingsViewController: NSViewController {
         trailStatusBadge.textColor = NSColor(red: 1.0, green: 0.55, blue: 0.15, alpha: 1.0)
         trailStatusBadge.lineBreakMode = .byTruncatingTail
 
-        methodCard.container.addSubview(stackModePopup)
-        methodCard.container.addSubview(alignCheckbox)
-        methodCard.container.addSubview(trailRemovalCheckbox)
-        methodCard.container.addSubview(analyzeTrailsButton)
-        methodCard.container.addSubview(trailStatusBadge)
-
-        NSLayoutConstraint.activate([
-            stackModePopup.topAnchor.constraint(equalTo: methodCard.container.topAnchor),
-            stackModePopup.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
-            stackModePopup.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-
-            alignCheckbox.topAnchor.constraint(equalTo: stackModePopup.bottomAnchor, constant: 8),
-            alignCheckbox.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
-            alignCheckbox.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-
-            trailRemovalCheckbox.topAnchor.constraint(equalTo: alignCheckbox.bottomAnchor, constant: 8),
-            trailRemovalCheckbox.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
-            trailRemovalCheckbox.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-
-            analyzeTrailsButton.topAnchor.constraint(equalTo: trailRemovalCheckbox.bottomAnchor, constant: 6),
-            analyzeTrailsButton.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
-            analyzeTrailsButton.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-            analyzeTrailsButton.heightAnchor.constraint(equalToConstant: 28),
-
-            trailStatusBadge.topAnchor.constraint(equalTo: analyzeTrailsButton.bottomAnchor, constant: 4),
-            trailStatusBadge.leadingAnchor.constraint(equalTo: methodCard.container.leadingAnchor),
-            trailStatusBadge.trailingAnchor.constraint(equalTo: methodCard.container.trailingAnchor),
-            trailStatusBadge.bottomAnchor.constraint(equalTo: methodCard.container.bottomAnchor),
-        ])
+        // 光跡除去の項目は比較明合成のときだけ表示する。非表示の間は場所を取らないよう縦のスタックに並べる
+        let methodRows = makeRowStack(
+            [stackModePopup, alignCheckbox, trailRemovalCheckbox, analyzeTrailsButton, trailStatusBadge],
+            spacings: [8, 8, 6, 4]
+        )
+        pin(methodRows, to: methodCard.container)
+        analyzeTrailsButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
         // カード2: コンポジット & マスク
         let maskCard = SectionCardView(title: "合成 & 空・地上マスク")
@@ -408,39 +391,22 @@ public class SettingsViewController: NSViewController {
         customLensField.target = self
         customLensField.action = #selector(onCustomLensChanged)
 
-        lensCard.container.addSubview(lensInfoCameraLabel)
-        lensCard.container.addSubview(lensInfoLensLabel)
-        lensCard.container.addSubview(lensInfoParamsLabel)
-        lensCard.container.addSubview(embedLensCheckbox)
-        lensCard.container.addSubview(lensHintLabel)
-        lensCard.container.addSubview(customLensField)
-
+        // 補足説明はチェックボックスの文字の位置にそろえて字下げする
+        let lensHintRow = NSView()
+        lensHintRow.translatesAutoresizingMaskIntoConstraints = false
+        lensHintRow.addSubview(lensHintLabel)
         NSLayoutConstraint.activate([
-            lensInfoCameraLabel.topAnchor.constraint(equalTo: lensCard.container.topAnchor),
-            lensInfoCameraLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
-            lensInfoCameraLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-
-            lensInfoLensLabel.topAnchor.constraint(equalTo: lensInfoCameraLabel.bottomAnchor, constant: 2),
-            lensInfoLensLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
-            lensInfoLensLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-
-            lensInfoParamsLabel.topAnchor.constraint(equalTo: lensInfoLensLabel.bottomAnchor, constant: 2),
-            lensInfoParamsLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
-            lensInfoParamsLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-
-            embedLensCheckbox.topAnchor.constraint(equalTo: lensInfoParamsLabel.bottomAnchor, constant: 8),
-            embedLensCheckbox.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
-            embedLensCheckbox.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-
-            lensHintLabel.topAnchor.constraint(equalTo: embedLensCheckbox.bottomAnchor, constant: 2),
-            lensHintLabel.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor, constant: 18),
-            lensHintLabel.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-
-            customLensField.topAnchor.constraint(equalTo: lensHintLabel.bottomAnchor, constant: 6),
-            customLensField.leadingAnchor.constraint(equalTo: lensCard.container.leadingAnchor),
-            customLensField.trailingAnchor.constraint(equalTo: lensCard.container.trailingAnchor),
-            customLensField.bottomAnchor.constraint(equalTo: lensCard.container.bottomAnchor),
+            lensHintLabel.topAnchor.constraint(equalTo: lensHintRow.topAnchor),
+            lensHintLabel.bottomAnchor.constraint(equalTo: lensHintRow.bottomAnchor),
+            lensHintLabel.leadingAnchor.constraint(equalTo: lensHintRow.leadingAnchor, constant: 18),
+            lensHintLabel.trailingAnchor.constraint(equalTo: lensHintRow.trailingAnchor),
         ])
+        // 基準画像が未設定のときはレンズ名・撮影条件の行が空になるため、非表示にして詰める
+        let lensRows = makeRowStack(
+            [lensInfoCameraLabel, lensInfoLensLabel, lensInfoParamsLabel, embedLensCheckbox, lensHintRow, customLensField],
+            spacings: [2, 2, 8, 2, 6]
+        )
+        pin(lensRows, to: lensCard.container)
 
         // カード4: 出力フォーマット & アクション
         let outCard = SectionCardView(title: "書き出し & 実行")
@@ -468,30 +434,10 @@ public class SettingsViewController: NSViewController {
         exportButton.target = self
         exportButton.action = #selector(onExportClicked)
 
-        outCard.container.addSubview(formatPopup)
-        outCard.container.addSubview(statusLabel)
-        outCard.container.addSubview(startStackButton)
-        outCard.container.addSubview(exportButton)
-
-        NSLayoutConstraint.activate([
-            formatPopup.topAnchor.constraint(equalTo: outCard.container.topAnchor),
-            formatPopup.leadingAnchor.constraint(equalTo: outCard.container.leadingAnchor),
-            formatPopup.trailingAnchor.constraint(equalTo: outCard.container.trailingAnchor),
-
-            statusLabel.topAnchor.constraint(equalTo: formatPopup.bottomAnchor, constant: 6),
-            statusLabel.leadingAnchor.constraint(equalTo: outCard.container.leadingAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: outCard.container.trailingAnchor),
-
-            startStackButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
-            startStackButton.leadingAnchor.constraint(equalTo: outCard.container.leadingAnchor),
-            startStackButton.trailingAnchor.constraint(equalTo: outCard.container.trailingAnchor),
-            startStackButton.heightAnchor.constraint(equalToConstant: 32),
-
-            exportButton.topAnchor.constraint(equalTo: startStackButton.bottomAnchor, constant: 6),
-            exportButton.leadingAnchor.constraint(equalTo: outCard.container.leadingAnchor),
-            exportButton.trailingAnchor.constraint(equalTo: outCard.container.trailingAnchor),
-            exportButton.bottomAnchor.constraint(equalTo: outCard.container.bottomAnchor),
-        ])
+        // 処理中のメッセージが無いときはステータス行を詰める
+        let outRows = makeRowStack([formatPopup, statusLabel, startStackButton, exportButton], spacings: [6, 6, 6])
+        pin(outRows, to: outCard.container)
+        startStackButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
         // スタックコンテナへの追加
         stackViewContainer.addSubview(methodCard)
@@ -686,20 +632,9 @@ public class SettingsViewController: NSViewController {
         startTimelapseButton.target = self
         startTimelapseButton.action = #selector(onStartTimelapseClicked)
 
-        actionCard.container.addSubview(timelapseStatusLabel)
-        actionCard.container.addSubview(startTimelapseButton)
-
-        NSLayoutConstraint.activate([
-            timelapseStatusLabel.topAnchor.constraint(equalTo: actionCard.container.topAnchor),
-            timelapseStatusLabel.leadingAnchor.constraint(equalTo: actionCard.container.leadingAnchor),
-            timelapseStatusLabel.trailingAnchor.constraint(equalTo: actionCard.container.trailingAnchor),
-
-            startTimelapseButton.topAnchor.constraint(equalTo: timelapseStatusLabel.bottomAnchor, constant: 6),
-            startTimelapseButton.leadingAnchor.constraint(equalTo: actionCard.container.leadingAnchor),
-            startTimelapseButton.trailingAnchor.constraint(equalTo: actionCard.container.trailingAnchor),
-            startTimelapseButton.heightAnchor.constraint(equalToConstant: 30),
-            startTimelapseButton.bottomAnchor.constraint(equalTo: actionCard.container.bottomAnchor),
-        ])
+        let actionRows = makeRowStack([timelapseStatusLabel, startTimelapseButton], spacings: [6])
+        pin(actionRows, to: actionCard.container)
+        startTimelapseButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
 
         // タイムラプスコンテナへの追加
         timelapseViewContainer.addSubview(rangeCard)
@@ -727,6 +662,35 @@ public class SettingsViewController: NSViewController {
         ])
     }
 
+    /// 行を縦に並べるスタックビュー。非表示にした行は場所を取らない（余白が残らない）。
+    /// spacings[i] は rows[i] と次の行の間隔。
+    private func makeRowStack(_ rows: [NSView], spacings: [CGFloat]) -> NSStackView {
+        let stack = NSStackView(views: rows)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.detachesHiddenViews = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for (row, spacing) in zip(rows, spacings) {
+            stack.setCustomSpacing(spacing, after: row)
+        }
+        for row in rows {
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return stack
+    }
+
+    private func pin(_ view: NSView, to container: NSView) {
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+    }
+
     // MARK: - UI更新
 
     public func updateUI() {
@@ -749,6 +713,8 @@ public class SettingsViewController: NSViewController {
             lensInfoLensLabel.stringValue = ""
             lensInfoParamsLabel.stringValue = ""
         }
+        lensInfoLensLabel.isHidden = lensInfoLensLabel.stringValue.isEmpty
+        lensInfoParamsLabel.isHidden = lensInfoParamsLabel.stringValue.isEmpty
 
         // 状態側の値をポップアップ・入力欄へ反映する（「すべてクリア」後も表示が食い違わないように）。
         let stackModeIndex: Int
@@ -799,8 +765,8 @@ public class SettingsViewController: NSViewController {
         analyzeTrailsButton.isEnabled = !state.isAnalyzingTrails && lightCount >= 3
         analyzeTrailsButton.title = state.isAnalyzingTrails ? "解析中 (\(Int(state.trailAnalysisProgress * 100))%)..." : "🔍 光跡を解析して確認…"
 
-        trailStatusBadge.isHidden = !isCompareBright || !state.enableTrailRemoval
         trailStatusBadge.stringValue = state.trailAnalysisStatus
+        trailStatusBadge.isHidden = !isCompareBright || !state.enableTrailRemoval || state.trailAnalysisStatus.isEmpty
 
         // マスクOFF時は、ブラシに関係する操作とキャンバス処理を完全に無効化する。
         skyGroundMaskCheckbox.state = state.enableSkyGroundMask ? .on : .off
@@ -824,6 +790,7 @@ public class SettingsViewController: NSViewController {
         startStackButton.isEnabled = !state.isStacking && !state.isAnalyzingTrails && lightCount > 0 && state.baseImage != nil
         exportButton.isEnabled = state.stackedResult != nil
         statusLabel.stringValue = state.stackingStatus
+        statusLabel.isHidden = state.stackingStatus.isEmpty
 
         // タイムラプス更新
         let maxFrames = max(1, lightCount)
@@ -864,6 +831,7 @@ public class SettingsViewController: NSViewController {
         frameRangeLabel.stringValue = "フレーム数: \(state.timelapseSettings.effectiveFrameCount) / 推定: \(String(format: "%.1f", state.timelapseSettings.estimatedDuration))秒"
         startTimelapseButton.isEnabled = !state.isExportingTimelapse && lightCount > 0
         timelapseStatusLabel.stringValue = state.timelapseStatus
+        timelapseStatusLabel.isHidden = state.timelapseStatus.isEmpty
     }
 
     // MARK: - 光跡レビューシート表示
@@ -904,6 +872,8 @@ public class SettingsViewController: NSViewController {
         let isStack = tabSegmentedControl.selectedSegment == 0
         stackViewContainer.isHidden = !isStack
         timelapseViewContainer.isHidden = isStack
+        stackBottomConstraint.isActive = isStack
+        timelapseBottomConstraint.isActive = !isStack
     }
 
     @objc private func onStackModeChanged() {
