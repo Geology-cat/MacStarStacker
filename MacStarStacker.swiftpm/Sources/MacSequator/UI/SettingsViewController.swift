@@ -635,6 +635,11 @@ public class SettingsViewController: NSViewController {
 
         codecPopup.translatesAutoresizingMaskIntoConstraints = false
         codecPopup.addItems(withTitles: ["H.264 (.mp4)", "H.265/HEVC (.mp4)"])
+        if !TimelapseSettings.OutputCodec.hevc.isAvailable, let hevcItem = codecPopup.item(at: 1) {
+            codecPopup.autoenablesItems = false
+            hevcItem.isEnabled = false
+            hevcItem.toolTip = "このMacはHEVCのハードウェアエンコードに対応していません"
+        }
         codecPopup.target = self
         codecPopup.action = #selector(onTimelapseSettingChanged)
 

@@ -129,6 +129,29 @@ int32_t LRReadInfo(const char *path, LRRawInfo *info, char *errorMessage, int32_
     return 0;
 }
 
+int32_t LRReadShootingInfo(const char *path, LRShootingInfo *info, char *errorMessage, int32_t errorLength) {
+    memset(info, 0, sizeof(*info));
+    libraw_data_t *lr = OpenFile(path, 0, errorMessage, errorLength);
+    if (!lr) return -1;
+    snprintf(info->make, sizeof(info->make), "%s", lr->idata.make);
+    snprintf(info->model, sizeof(info->model), "%s", lr->idata.model);
+    snprintf(info->lensMake, sizeof(info->lensMake), "%s", lr->lens.LensMake);
+    // EXIFのレンズ名が無い機種は、メーカーノートから得たレンズ名を使う
+    snprintf(info->lens, sizeof(info->lens), "%s", lr->lens.Lens[0] ? lr->lens.Lens : lr->lens.makernotes.Lens);
+    info->focalLength = lr->other.focal_len;
+    info->focalLength35mm = lr->lens.FocalLengthIn35mmFormat;
+    info->aperture = lr->other.aperture;
+    info->shutter = lr->other.shutter;
+    info->iso = lr->other.iso_speed;
+    info->timestamp = (int64_t)lr->other.timestamp;
+    info->minFocal = lr->lens.MinFocal;
+    info->maxFocal = lr->lens.MaxFocal;
+    info->maxApertureAtMinFocal = lr->lens.MaxAp4MinFocal;
+    info->maxApertureAtMaxFocal = lr->lens.MaxAp4MaxFocal;
+    libraw_close(lr);
+    return 0;
+}
+
 int32_t LRReadBayer(const char *path, LRRawInfo *info, uint16_t **outPixels,
                     char *errorMessage, int32_t errorLength) {
     *outPixels = NULL;

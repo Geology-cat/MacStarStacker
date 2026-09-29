@@ -69,7 +69,7 @@ final class TrailReviewViewControllerTests: XCTestCase {
     func testReviewViewContainsEnabledHighlightCheckbox() {
         let item = makeItem()
         let controller = TrailReviewViewController(items: [item])
-        controller.loadViewIfNeeded()
+        _ = controller.view  // loadViewIfNeeded() は macOS 14 以降
         controller.view.layoutSubtreeIfNeeded()
         let checkbox = allSubviews(of: controller.view)
             .compactMap { $0 as? NSButton }
@@ -97,7 +97,7 @@ final class TrailReviewViewControllerTests: XCTestCase {
     func testManyCandidatesDoNotIncreaseInitialWindowSize() {
         let items = (0..<60).map { makeItem(frameIndex: $0) }
         let controller = TrailReviewViewController(items: items)
-        controller.loadViewIfNeeded()
+        _ = controller.view  // loadViewIfNeeded() は macOS 14 以降
         controller.view.layoutSubtreeIfNeeded()
         XCTAssertLessThanOrEqual(controller.view.frame.width, 720)
         XCTAssertLessThanOrEqual(controller.view.frame.height, 440)

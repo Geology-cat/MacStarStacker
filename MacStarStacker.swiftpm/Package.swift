@@ -4,13 +4,13 @@ import PackageDescription
 // OpenCV・LibRaw は scripts/build_deps.sh でソースからビルドした Universal 静的ライブラリを使う。
 // （Homebrew の dylib はビルドしたMacのOSが最低対応OSになり、アーキテクチャも1種類しか含まないため）
 // 最低対応OSを変えるときは、ここと Info.plist の LSMinimumSystemVersion、build_app.sh を合わせる。
-let deploymentTarget = "14.0"
+let deploymentTarget = "10.13"
 let vendorDir = "\(Context.packageDirectory)/Vendor/macos\(deploymentTarget)"
 
 let package = Package(
     name: "MacSequator",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v10_13)
     ],
     products: [
         .executable(

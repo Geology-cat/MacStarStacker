@@ -1,15 +1,31 @@
 import AppKit
 import Foundation
 
-/// macOS標準画像とFITSを同じ経路で読み込む。
+/// macOS標準画像・RAW・FITSを同じ経路で読み込む。
 enum ImageLoader {
     static func load(from url: URL) -> NSImage? {
         switch url.pathExtension.lowercased() {
         case "fit", "fits":
             return FITSImageReader.load(from: url)
+        case _ where RawDecoder.isRawFile(url):
+            return loadRAW(from: url)
         default:
             return NSImage(contentsOf: url)
         }
+    }
+
+    /// RAWは常にLibRawで現像する。古いmacOSのRAWエンジンは新しい機種やCR3を読めず、失敗せずに
+    /// 埋め込みの小さなプレビュー画像を返すことがあるため、OSによって合成に使う画像が変わらないようにする。
+    /// macOSで開いたときと同じく、撮影時の向きに回転して返す。
+    private static func loadRAW(from url: URL) -> NSImage? {
+        guard let info = try? RawDecoder.readInfo(from: url),
+              let rendered = try? RawDecoder.renderSRGB(
+                from: url, exposure: RawStackPipeline.baselineExposure(for: url)),
+              let oriented = RawDecoder.orient(
+                rendered, to: CGImagePropertyOrientation(rawValue: UInt32(info.orientation)) ?? .up) else {
+            return nil
+        }
+        return NSImage(cgImage: oriented, size: NSSize(width: oriented.width, height: oriented.height))
     }
 }
 

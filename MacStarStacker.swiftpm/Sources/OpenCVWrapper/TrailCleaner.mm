@@ -77,10 +77,25 @@ static cv::Mat MatFromNSImage(NSImage *image) {
 }
 
 // ── Helper: 堅牢な画像読み込み (macOS ImageIO/NSImage 優先) ──
+static NSImage * _Nullable (^gImageLoader)(NSURL *) = nil;
+
++ (NSImage * _Nullable (^)(NSURL *))imageLoader {
+    @synchronized (self) {
+        return gImageLoader;
+    }
+}
+
++ (void)setImageLoader:(NSImage * _Nullable (^)(NSURL *))imageLoader {
+    @synchronized (self) {
+        gImageLoader = [imageLoader copy];
+    }
+}
+
 static cv::Mat LoadColorMatFromURL(NSURL *url) {
     if (!url) return cv::Mat();
 
-    NSImage *nsImg = [[NSImage alloc] initWithContentsOfURL:url];
+    NSImage * _Nullable (^loader)(NSURL *) = TrailCleaner.imageLoader;
+    NSImage *nsImg = loader ? loader(url) : [[NSImage alloc] initWithContentsOfURL:url];
     if (nsImg) {
         CGImageRef cgImage = [nsImg CGImageForProposedRect:nil context:nil hints:nil];
         if (cgImage) {

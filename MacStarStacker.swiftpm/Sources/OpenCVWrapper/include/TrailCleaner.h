@@ -23,6 +23,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// OpenCVを用いた飛行機・人工衛星・車の光跡検出およびインペイント修復クラス
 @interface TrailCleaner : NSObject
 
+/// 画像の読み込み方法を差し替える（RAWをLibRawで現像するため。LibRawはアプリ側のターゲットにある）。
+/// 未設定のときは NSImage で読み込む。
+@property (class, nonatomic, copy, nullable) NSImage * _Nullable (^imageLoader)(NSURL *url);
+
 /// 連続する画像フレーム群を解析し、人工の光跡が含まれるフレームとマスクを検出する
 + (NSArray<TrailDetectionResult *> *)detectTrailsInImageURLs:(NSArray<NSURL *> *)imageURLs
                                             progressCallback:(void (^ _Nullable)(double progress, NSString *status))progressCallback;

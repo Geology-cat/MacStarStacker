@@ -102,7 +102,9 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         resetAllButton.title = "すべてクリア"
         resetAllButton.bezelStyle = .roundRect
         resetAllButton.font = NSFont.systemFont(ofSize: 11)
-        resetAllButton.contentTintColor = .systemRed
+        if #available(macOS 10.14, *) {
+            resetAllButton.contentTintColor = .systemRed
+        }
         resetAllButton.toolTip = "画像・結果・マスク・設定をすべて破棄して起動時の状態に戻します"
         resetAllButton.target = self
         resetAllButton.action = #selector(onResetAllClicked)

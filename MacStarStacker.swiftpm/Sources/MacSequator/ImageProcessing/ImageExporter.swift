@@ -1,6 +1,5 @@
 import Foundation
 import AppKit
-import UniformTypeIdentifiers
 
 /// スタック後の画像を指定フォーマットで書き出すクラス
 class ImageExporter {
@@ -38,9 +37,7 @@ class ImageExporter {
     ) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
-            if let contentType = UTType(filenameExtension: format.fileExtension) {
-                panel.allowedContentTypes = [contentType]
-            }
+            panel.allowedFileTypes = [format.fileExtension]
             panel.nameFieldStringValue = "stacked_result.\(format.fileExtension)"
             panel.begin { response in
                 guard response == .OK, let url = panel.url else { return }

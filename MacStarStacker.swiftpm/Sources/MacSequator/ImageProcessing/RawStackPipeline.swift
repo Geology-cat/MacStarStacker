@@ -449,10 +449,20 @@ enum RawStackPipeline {
 
     /// 機種ごとの露出基準（DNGのBaselineExposure）。Adobeの機種別の値は取得できないため、
     /// macOSのRAWエンジンの値から推定する。DNGはファイル内の値がそのまま返るので補正しない。
+    /// macOSのRAWエンジンが対応していない機種（古いOSでの新しい機種など）は値が得られず 0 になる。
     static func baselineExposure(for url: URL) -> Double {
-        guard let filter = CIRAWFilter(imageURL: url) else { return 0 }
-        let value = Double(filter.baselineExposure)
+        guard let value = systemBaselineExposure(for: url) else { return 0 }
         return url.pathExtension.lowercased() == "dng" ? value : value - appleBaselineExposureOffset
+    }
+
+    private static func systemBaselineExposure(for url: URL) -> Double? {
+        if #available(macOS 12.0, *) {
+            return CIRAWFilter(imageURL: url).map { Double($0.baselineExposure) }
+        }
+        // macOS 11 以前は旧来のRAWフィルタから読む。未対応の機種では入力キー自体が無いことがあるため確認する。
+        let key = CIRAWFilterOption.baselineExposure.rawValue
+        guard let filter = CIFilter(imageURL: url, options: nil), filter.inputKeys.contains(key) else { return nil }
+        return (filter.value(forKey: key) as? NSNumber)?.doubleValue
     }
 
     /// 合成結果を一時DNGに書き、macOSのRAWエンジンで現像して表示用・プレビュー用の画像を作る。
@@ -485,7 +495,7 @@ enum RawStackPipeline {
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         let context = CIContext(options: [.workingFormat: CIFormat.RGBAh])
         let preview: CGImage
-        if let filter = CIRAWFilter(imageURL: temporaryURL) {
+        if #available(macOS 12.0, *), let filter = CIRAWFilter(imageURL: temporaryURL) {
             // プレビューはDNGの向き指定と二重に回転しないよう、センサーの向きのまま作る
             filter.orientation = .up
             if let sensorImage = filter.outputImage,
@@ -497,6 +507,7 @@ enum RawStackPipeline {
                 preview = try RawDecoder.renderSRGB(from: temporaryURL, exposure: baselineExposure)
             }
         } else {
+            // macOS 11 以前（CIRAWFilter が無い）はLibRawで現像する
             preview = try RawDecoder.renderSRGB(from: temporaryURL, exposure: baselineExposure)
         }
 

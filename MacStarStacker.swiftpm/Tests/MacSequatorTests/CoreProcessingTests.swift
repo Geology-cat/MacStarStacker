@@ -252,7 +252,7 @@ final class CoreProcessingTests: XCTestCase {
         state.enableSkyGroundMask = false
         state.maskFeatherRadius = 27
         let controller = SettingsViewController()
-        controller.loadViewIfNeeded()
+        _ = controller.view  // loadViewIfNeeded() は macOS 14 以降
         controller.view.layoutSubtreeIfNeeded()
         let views = allSubviews(of: controller.view)
         let slider = try XCTUnwrap(views.compactMap { $0 as? NSSlider }.first {
@@ -406,8 +406,10 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertFalse(packet.contains("LensProfileFilename"), "存在しないLCPファイル名を捏造しない")
 
         // macOSのRAWデコーダーが埋め込みプレビューを認識すること（未認識だとFinderのサムネイルが真っ黒になる）
-        let previewImage = try XCTUnwrap(CIRAWFilter(imageURL: url)?.previewImage, "埋め込みプレビューがmacOSに認識されていません")
-        XCTAssertEqual(Int(max(previewImage.extent.width, previewImage.extent.height)), width)
+        if #available(macOS 12.0, *) {
+            let previewImage = try XCTUnwrap(CIRAWFilter(imageURL: url)?.previewImage, "埋め込みプレビューがmacOSに認識されていません")
+            XCTAssertEqual(Int(max(previewImage.extent.width, previewImage.extent.height)), width)
+        }
     }
 
     /// 約8MBを超える画像ではストリップが複数に分割され、各ストリップが正しい行を指すこと。
@@ -456,7 +458,9 @@ final class CoreProcessingTests: XCTestCase {
             XCTAssertEqual(u16(offset), lut[firstRow % 256], accuracy: 1500, "ストリップ\(strip)の位置がずれています")
         }
         XCTAssertEqual(total, width * height * 6)
-        XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage)
+        if #available(macOS 12.0, *) {
+            XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage)
+        }
     }
 
     func testDNGWithoutLensProfileStillEmbedsColorSettings() throws {

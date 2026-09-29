@@ -1,6 +1,7 @@
 import Foundation
 import ImageIO
 import CoreImage
+import LibRawBridge
 
 /// RAW画像から抽出されたレンズ情報および撮影メタデータを保持する構造体
 public struct RawMetadataInfo: Sendable {
@@ -93,7 +94,12 @@ public enum RawMetadataExtractor {
             parseImageIOProperties(props, into: &info)
         }
         
-        // 2. レンズ名やモデル名が不足している場合、ExifToolでさらに詳細に補完
+        // 2. 古いmacOSは新しい機種やCR3のメタデータを読めないことがあるため、RAWはLibRawで補完
+        if RawDecoder.isRawFile(url), info.lensModel.isEmpty || info.cameraModel.isEmpty || info.iso == nil {
+            fillFromLibRaw(url, into: &info)
+        }
+
+        // 3. レンズ名やモデル名が不足している場合、ExifToolでさらに詳細に補完
         if info.lensModel.isEmpty || info.cameraModel.isEmpty {
             info = extractViaExifTool(from: url, fallback: info)
         }
@@ -222,6 +228,52 @@ public enum RawMetadataExtractor {
         }
     }
     
+    // MARK: - LibRaw による補完
+
+    /// ImageIO で取得できなかった項目だけを LibRaw の値で埋める。
+    private static func fillFromLibRaw(_ url: URL, into info: inout RawMetadataInfo) {
+        var raw = LRShootingInfo()
+        var message = [CChar](repeating: 0, count: 256)
+        let code = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return LRReadShootingInfo(path, &raw, &message, Int32(message.count))
+        }
+        guard code == 0 else { return }
+
+        func text<T>(_ tuple: T) -> String {
+            withUnsafeBytes(of: tuple) { bytes in
+                let chars = bytes.bindMemory(to: UInt8.self)
+                let end = chars.firstIndex(of: 0) ?? chars.count
+                return String(decoding: chars[..<end], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        func positive(_ value: Double) -> Double? { value > 0 ? value : nil }
+
+        if info.cameraMake.isEmpty { info.cameraMake = text(raw.make) }
+        if info.cameraModel.isEmpty { info.cameraModel = text(raw.model) }
+        if info.lensMake.isEmpty { info.lensMake = text(raw.lensMake) }
+        if info.lensModel.isEmpty { info.lensModel = text(raw.lens) }
+        if info.focalLength == nil { info.focalLength = positive(raw.focalLength) }
+        if info.focalLength35mm == nil { info.focalLength35mm = positive(raw.focalLength35mm) }
+        if info.fNumber == nil { info.fNumber = positive(raw.aperture) }
+        if info.exposureTime == nil { info.exposureTime = positive(raw.shutter) }
+        if info.iso == nil, raw.iso > 0 { info.iso = Int(raw.iso.rounded()) }
+        if info.lensSpecification.isEmpty, raw.minFocal > 0, raw.maxFocal > 0 {
+            info.lensSpecification = [raw.minFocal, raw.maxFocal, raw.maxApertureAtMinFocal, raw.maxApertureAtMaxFocal]
+        }
+        if info.dateTimeOriginal.isEmpty, raw.timestamp > 0 {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            info.dateTimeOriginal = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(raw.timestamp)))
+        }
+        if info.uniqueCameraModel.isEmpty, !info.cameraModel.isEmpty {
+            let make = info.cameraMake
+            info.uniqueCameraModel = make.isEmpty || info.cameraModel.lowercased().hasPrefix(make.lowercased())
+                ? info.cameraModel : "\(make) \(info.cameraModel)"
+        }
+    }
+
     // MARK: - ExifTool フォールバック・高度抽出
     private static func extractViaExifTool(from url: URL, fallback: RawMetadataInfo) -> RawMetadataInfo {
         var info = fallback

@@ -3,7 +3,6 @@ import AVFoundation
 import AppKit
 import CoreImage
 import OpenCVWrapper
-import UniformTypeIdentifiers
 
 // MARK: - Timelapse Settings Model
 struct TimelapseSettings {
@@ -64,14 +63,20 @@ struct TimelapseSettings {
         var avCodec: AVVideoCodecType {
             switch self {
             case .h264: return .h264
-            case .hevc:
-                if #available(macOS 10.13, *) {
-                    return .hevc
-                } else {
-                    return .h264
-                }
+            case .hevc: return .hevc
             }
         }
+
+        /// このMacで書き出せるか。HEVCはハードウェアエンコーダーが必要で、2015年頃より前のMacでは使えない。
+        var isAvailable: Bool {
+            switch self {
+            case .h264: return true
+            case .hevc: return Self.isHEVCEncodingAvailable
+            }
+        }
+
+        private static let isHEVCEncodingAvailable =
+            AVOutputSettingsAssistant.availableOutputSettingsPresets().contains(.hevc1920x1080)
     }
 
     // ── Computed helpers ──────────────────────────────────────────────
@@ -107,7 +112,7 @@ class TimelapseExporter {
     ) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
-            panel.allowedContentTypes = [.mpeg4Movie]
+            panel.allowedFileTypes = ["mp4"]
             panel.nameFieldStringValue = "MacStarStacker_Timelapse.mp4"
             panel.begin { response in
                 guard response == .OK, let url = panel.url else {
@@ -169,6 +174,9 @@ class TimelapseExporter {
         // H.264 / HEVC が要求する偶数サイズへ丸める。
         let outWidth  = max(2, Int(outSize.width).isMultiple(of: 2) ? Int(outSize.width) : Int(outSize.width) - 1)
         let outHeight = max(2, Int(outSize.height).isMultiple(of: 2) ? Int(outSize.height) : Int(outSize.height) - 1)
+        guard settings.codec.isAvailable else {
+            throw ExportError(message: "このMacはHEVCの書き出しに対応していません。H.264を選択してください")
+        }
         if settings.codec == .hevc, outWidth < 320 || outHeight < 240 {
             throw ExportError(message: "HEVC書き出しには320×240以上の解像度が必要です")
         }

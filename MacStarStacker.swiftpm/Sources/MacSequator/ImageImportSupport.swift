@@ -1,5 +1,4 @@
 import Cocoa
-import UniformTypeIdentifiers
 import ObjectiveC
 
 private var openPanelDelegateAssociationKey: UInt8 = 0
@@ -90,9 +89,8 @@ enum ImageImportSupport {
         panel.canChooseDirectories = true
         panel.resolvesAliases = true
         panel.treatsFilePackagesAsDirectories = false
-        // FITSはmacOSで未宣言の動的UTTypeになるため、.dataで受けて
+        // FITSはmacOSで未宣言の拡張子のため種類では絞らず（全ファイルを許可）、
         // delegate側で拡張子を厳密に絞る。通常画像とFITSを同時に正しく選択できる。
-        panel.allowedContentTypes = [.data]
         let filterDelegate = ImageOpenPanelDelegate()
         panel.delegate = filterDelegate
         objc_setAssociatedObject(

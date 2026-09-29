@@ -6,7 +6,7 @@ set -euo pipefail
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$PROJ_DIR/../dist"
 # Package.swift の deploymentTarget と合わせる
-DEPLOYMENT_TARGET="14.0"
+DEPLOYMENT_TARGET="10.13"
 ARCHS=(arm64 x86_64)
 BUILD_DIR="$PROJ_DIR/.build/apple/Products/Release"
 APP_NAME="MacStarStacker"          # display name of the .app
@@ -54,9 +54,46 @@ if [ -f "$ICNS_SRC" ]; then
     echo "Icon: AppIcon.icns copied"
 fi
 
-# 5. 依存ライブラリは静的リンクのため、システム外のdylibを参照していないこと・全アーキテクチャを含むことを確認
-EXTERNAL_DYLIBS="$(otool -L "$CONTENTS/MacOS/$APP_NAME" | tail -n +2 | awk '{print $1}' \
-    | grep -vE '^(/System/|/usr/lib/)' || true)"
+# 5. macOS 10.14.4 より前のOSにはSwiftランタイムが無いため、アプリに同梱する（x86_64のみ。arm64はmacOS 11以降）。
+#    実行ファイルの LC_RPATH は /usr/lib/swift が @executable_path/../Frameworks より先に並ぶため、
+#    新しいOSではOS内蔵のランタイムが使われ、同梱分は macOS 10.13〜10.14.3 でだけ読み込まれる。
+SWIFT_BACKDEPLOY_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx"
+if [ ! -f "$SWIFT_BACKDEPLOY_DIR/libswiftCore.dylib" ]; then
+    echo "ERROR: Swift runtime for back-deployment not found: $SWIFT_BACKDEPLOY_DIR" >&2
+    echo "       Xcode 16.x を使ってください（新しいXcodeでは10.13向けの同梱用ランタイムが無い可能性があります）" >&2
+    exit 1
+fi
+mkdir -p "$CONTENTS/Frameworks"
+xcrun swift-stdlib-tool --copy --platform macosx \
+    --scan-executable "$CONTENTS/MacOS/$APP_NAME" \
+    --source-libraries "$SWIFT_BACKDEPLOY_DIR" \
+    --destination "$CONTENTS/Frameworks"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$CONTENTS/MacOS/$APP_NAME"
+echo "Embedded Swift runtime: $(ls "$CONTENTS/Frameworks" | wc -l | tr -d ' ') libraries"
+
+RPATHS="$(otool -arch x86_64 -l "$CONTENTS/MacOS/$APP_NAME" | awk '/LC_RPATH/{getline; getline; print $2}')"
+if [ "$(echo "$RPATHS" | grep -n '^/usr/lib/swift$' | cut -d: -f1)" -gt \
+     "$(echo "$RPATHS" | grep -n '^@executable_path/../Frameworks$' | cut -d: -f1)" ]; then
+    echo "ERROR: /usr/lib/swift must precede @executable_path/../Frameworks in LC_RPATH:" >&2
+    echo "$RPATHS" >&2
+    exit 1
+fi
+
+# 6. 依存ライブラリは静的リンクのため、システム外のdylibを参照していないこと・全アーキテクチャを含むことを確認
+# システムのライブラリと、同梱したSwiftランタイム以外への参照を出力する
+list_external_dylibs() {
+    local ARCH DEP
+    for ARCH in "${ARCHS[@]}"; do
+        otool -arch "$ARCH" -L "$CONTENTS/MacOS/$APP_NAME" | tail -n +2 | awk '{print $1}'
+    done | sort -u | while IFS= read -r DEP; do
+        case "$DEP" in
+            /System/*|/usr/lib/*) ;;
+            @rpath/libswift*) [ -f "$CONTENTS/Frameworks/${DEP#@rpath/}" ] || echo "$DEP" ;;
+            *) echo "$DEP" ;;
+        esac
+    done
+}
+EXTERNAL_DYLIBS="$(list_external_dylibs)"
 if [ -n "$EXTERNAL_DYLIBS" ]; then
     echo "ERROR: System-external libraries are referenced:" >&2
     echo "$EXTERNAL_DYLIBS" >&2
@@ -70,12 +107,12 @@ for ARCH in "${ARCHS[@]}"; do
 done
 echo "Architectures: $(lipo -archs "$CONTENTS/MacOS/$APP_NAME")"
 
-# 6. 隔離属性を除去し、アドホック署名を付与
+# 7. 隔離属性を除去し、アドホック署名を付与
 xattr -cr "$APP_DIR" 2>/dev/null || true
 codesign --force --deep --sign - "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
-# 7. DMG staging area
+# 8. DMG staging area
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
 echo "=== Preparing DMG Contents ==="
@@ -97,11 +134,15 @@ MacStarStacker インストール＆初回起動ガイド
 本ビルドはAppleのDeveloper IDでは署名・公証されていません。
 警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
 
-対応OS: macOS 14 (Sonoma) 以降
+対応OS: macOS 10.13 (High Sierra) 以降（Apple Silicon Mac は macOS 11 以降）
 収録アーキテクチャ: Universal（Apple Silicon / Intel のどちらでもネイティブ動作）
+
+【古いMacでの注意】
+・Metal非対応のMac（おおむね2011年以前）では、GPUを使わずCPUで合成するため時間がかかります。
+・H.265/HEVCの動画書き出しは、HEVCのハードウェアエンコーダーを持つMacでのみ選択できます。
 EOF
 
-# 8. Create DMG package
+# 9. Create DMG package
 echo "=== Packaging DMG image in dist/ ==="
 rm -f "$DMG_PATH"
 hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" > /dev/null

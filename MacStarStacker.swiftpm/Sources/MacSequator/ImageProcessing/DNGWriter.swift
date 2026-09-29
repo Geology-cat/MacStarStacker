@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import ImageIO
-import UniformTypeIdentifiers
 
 /// DNG 1.4互換の16-bitリニアDNG (Linear RAW) を書き出すライター
 ///
@@ -296,7 +295,7 @@ public enum DNGWriter {
     private static func renderJPEGPreview(_ cgImage: CGImage, maxSide: Int) throws -> JPEGPreview {
         let image = try renderSRGBImage(cgImage, maxSide: maxSide)
         let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, UTType.jpeg.identifier as CFString, 1, nil) else {
+        guard let destination = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else {
             throw writerError(5, "JPEGプレビューを生成できませんでした")
         }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)

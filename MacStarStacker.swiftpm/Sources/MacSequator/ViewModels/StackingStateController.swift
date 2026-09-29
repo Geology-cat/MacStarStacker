@@ -86,7 +86,10 @@ class StackingStateController {
     private let maxUndo = 20
     private var stateNotificationPending = false
 
-    init() {}
+    init() {
+        // 光跡検出・修復でもRAWをLibRawで読み込み、合成と同じ画像を使う
+        TrailCleaner.imageLoader = { ImageLoader.load(from: $0) }
+    }
 
     func saveUndoSnapshot() {
         let snap = Snapshot(images: images, baseImage: baseImage, previewImage: previewImage)

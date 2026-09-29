@@ -101,7 +101,7 @@ public class TrailReviewViewController: NSViewController, NSTableViewDataSource,
 
     /// 初期表示はコンパクトに保ちつつ、候補の細部を見たいときは拡大できるレビューウィンドウ。
     func makeReviewWindow() -> NSWindow {
-        loadViewIfNeeded()
+        _ = view  // loadViewIfNeeded() は macOS 14 以降のため、view の参照で読み込む
         let size = Self.contentSize(for: NSScreen.main?.visibleFrame)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),

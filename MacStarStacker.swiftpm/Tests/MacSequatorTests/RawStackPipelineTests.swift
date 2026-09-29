@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import CoreImage
+import LibRawBridge
 @testable import MacSequator
 
 /// RAW（ベイヤー配列）のまま合成する経路のテスト。入力には既知の値で作ったベイヤー配列DNGを使う。
@@ -364,7 +365,9 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(reread.pixels, pa)
         XCTAssertEqual(reread.info.cfaPattern, pattern)
         XCTAssertEqual(reread.info.uniqueCameraModel, "Canon EOS 6D")
-        XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage, "埋め込みプレビューがmacOSに認識されること")
+        if #available(macOS 12.0, *) {
+            XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage, "埋め込みプレビューがmacOSに認識されること")
+        }
     }
 
     // MARK: - アプリの合成処理から
@@ -510,6 +513,62 @@ final class RawStackPipelineTests: XCTestCase {
         try result.writeDNG(metadata: nil, embedLensProfile: false, to: url)
         let reread = try RawDecoder.readInfo(from: url)
         XCTAssertFalse(reread.isBayer, "位置合わせ結果はデモザイク済みのリニアDNG")
-        XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage)
+        if #available(macOS 12.0, *) {
+            XCTAssertNotNil(CIRAWFilter(imageURL: url)?.previewImage)
+        }
+    }
+
+    // MARK: - 古いmacOS向け（RAWは常にLibRawで読む）
+
+    func testImageLoaderDecodesRAWWithLibRawAndAppliesOrientation() throws {
+        let (landscape, _) = try makeBayerDNG("landscape.dng") { _, _, _ in 4000 }
+        let (portrait, _) = try makeBayerDNG("portrait.dng", orientation: 6) { _, _, _ in 4000 }
+        let a = try XCTUnwrap(ImageLoader.load(from: landscape)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertEqual([a.width, a.height], [64, 48], "センサーと同じ大きさで現像されること（埋め込みプレビューではない）")
+        let b = try XCTUnwrap(ImageLoader.load(from: portrait)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertEqual([b.width, b.height], [48, 64], "撮影時の向き（90度回転）が反映されること")
+    }
+
+    func testOrientRotatesPixelsLikeEXIFOrientation() throws {
+        // 3x2 の左上の画素だけ白い16bit画像
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 3, height: 2, bitsPerComponent: 16, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue))
+        context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 3, height: 2))
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 1, width: 1, height: 1))  // 左下原点なので y=1 が上の行
+        let image = try XCTUnwrap(context.makeImage())
+
+        /// 白い画素の位置（左上原点）と画像の大きさ
+        func whitePixel(_ image: CGImage?) throws -> [Int] {
+            let image = try XCTUnwrap(image)
+            let data = try XCTUnwrap(image.dataProvider?.data) as Data
+            for y in 0..<image.height {
+                for x in 0..<image.width {
+                    let offset = y * image.bytesPerRow + x * image.bitsPerPixel / 8
+                    let red = UInt16(data[offset]) | UInt16(data[offset + 1]) << 8
+                    if red > 30000 { return [x, y, image.width, image.height] }
+                }
+            }
+            return []
+        }
+        XCTAssertEqual(try whitePixel(image), [0, 0, 3, 2])
+        XCTAssertEqual(try whitePixel(RawDecoder.orient(image, to: .right)), [1, 0, 2, 3], "時計回り: 左上→右上")
+        XCTAssertEqual(try whitePixel(RawDecoder.orient(image, to: .left)), [0, 2, 2, 3], "反時計回り: 左上→左下")
+        XCTAssertEqual(try whitePixel(RawDecoder.orient(image, to: .down)), [2, 1, 3, 2], "180度: 左上→右下")
+    }
+
+    func testLibRawShootingInfoReadsCameraFromRAW() throws {
+        let (url, _) = try makeBayerDNG("meta.dng") { _, _, _ in 4000 }
+        var info = LRShootingInfo()
+        var message = [CChar](repeating: 0, count: 256)
+        let code = url.withUnsafeFileSystemRepresentation { path in
+            LRReadShootingInfo(path!, &info, &message, Int32(message.count))
+        }
+        XCTAssertEqual(code, 0, String(cString: message))
+        let model = withUnsafeBytes(of: info.model) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+        XCTAssertTrue(model.contains("6D"), "機種名: \(model)")
     }
 }

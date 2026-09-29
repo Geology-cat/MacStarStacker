@@ -35,6 +35,31 @@ typedef struct {
     char model[128];
 } LRRawInfo;
 
+/// 撮影情報（EXIF相当）。取得できない項目は0または空文字。
+typedef struct {
+    char make[64];
+    char model[128];
+    char lensMake[128];
+    char lens[128];
+    /// 焦点距離（mm）と35mm判換算の焦点距離
+    double focalLength;
+    double focalLength35mm;
+    /// F値・露出時間（秒）・ISO感度
+    double aperture;
+    double shutter;
+    double iso;
+    /// 撮影日時（UNIX時刻。カメラの記録時刻をローカル時刻として解釈した値）
+    int64_t timestamp;
+    /// レンズの焦点距離範囲と、その両端での開放F値
+    double minFocal;
+    double maxFocal;
+    double maxApertureAtMinFocal;
+    double maxApertureAtMaxFocal;
+} LRShootingInfo;
+
+/// 撮影情報だけを読む（画素は展開しない）。成功時0。
+int32_t LRReadShootingInfo(const char *path, LRShootingInfo *info, char *errorMessage, int32_t errorLength);
+
 /// メタデータとセンサー情報だけを読む（画素は展開しないため高速）。成功時0。
 int32_t LRReadInfo(const char *path, LRRawInfo *info, char *errorMessage, int32_t errorLength);
 

@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ImageIO
 import LibRawBridge
 
 /// LibRawから得たRAWファイルのセンサー情報
@@ -164,6 +165,36 @@ enum RawDecoder {
             throw DecodeError(message: "現像結果の画像を作成できませんでした: \(url.lastPathComponent)")
         }
         return image
+    }
+
+    /// 16bit RGB画像を EXIF の向き（LibRawのflipに対応する 1・3・6・8）に回転する。
+    static func orient(_ image: CGImage, to orientation: CGImagePropertyOrientation) -> CGImage? {
+        guard orientation != .up else { return image }
+        let swapsAxes = orientation == .right || orientation == .left
+        let width = swapsAxes ? image.height : image.width
+        let height = swapsAxes ? image.width : image.height
+        guard let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 16, bytesPerRow: 0,
+            space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+        ) else { return nil }
+        // CGContext は左下原点。回転後の画像が (0,0)-(width,height) に収まるよう平行移動する。
+        switch orientation {
+        case .down:
+            context.translateBy(x: CGFloat(width), y: CGFloat(height))
+            context.rotate(by: .pi)
+        case .right:  // 時計回りに90度
+            context.translateBy(x: 0, y: CGFloat(height))
+            context.rotate(by: -.pi / 2)
+        case .left:   // 反時計回りに90度
+            context.translateBy(x: CGFloat(width), y: 0)
+            context.rotate(by: .pi / 2)
+        default:
+            return image
+        }
+        context.interpolationQuality = .none
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
     }
 
     private static func errorText(_ message: [CChar], url: URL) -> String {

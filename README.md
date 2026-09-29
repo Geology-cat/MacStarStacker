@@ -3,10 +3,20 @@
 星景写真に特化したMacネイティブの画像スタッキング・コンポジットアプリケーションです。
 Windows用ソフトウェア「Sequator」のように、星の日周運動を追尾しながら地上の風景を固定して合成する「空と地上の分離」スタッキングを実現します。
 
-macOS 14 (Sonoma) 以降に対応しています（macOS 15.7でビルド・検証）。
-配布DMGはUniversal版（Apple Silicon / Intel のどちらでもネイティブ動作）です。
+**このブランチ（`macos10.13`）は macOS 10.13 (High Sierra) 以降に対応した版です。**
+Intel Mac は macOS 10.13 以降、Apple Silicon Mac は macOS 11 以降でネイティブに動作するUniversal版です
+（macOS 15.7でビルド・検証。10.13実機での検証は別途必要）。
 
-> macOS 10.13 (High Sierra) 以降に対応した版は `macos10.13` ブランチで開発しています。
+> 最新OS向けに機能を拡充する版（macOS 14以降）は `main` ブランチで開発しています。
+
+### macOS 14以降向け（main）との違い
+- **RAWの読み込み**: 常にLibRawで現像します。古いmacOSのRAWエンジンは新しい機種やCR3を読めず、
+  小さな埋め込みプレビューを返すことがあるためです。表示の色味はmacOS標準の現像と少し異なります。
+- **撮影情報**: macOSが読めないRAW（10.13でのCR3など）は、LibRawで機種・レンズ・撮影条件を補完します。
+- **H.265/HEVC書き出し**: HEVCのハードウェアエンコーダーを持つMacでのみ選択できます。
+- **GPU合成**: Metal非対応のMac（おおむね2011年以前）ではCPUで合成します。
+- **Swiftランタイム**: macOS 10.14.4 より前のOS向けに、アプリへ同梱します（ビルドにはXcode 16.xが必要）。
+- 新しいAPI（macOS 11以降のUTType、macOS 12以降のCIRAWFilterなど）は `#available` で分岐し、古いOSでは代替処理を使います。
 
 ---
 
@@ -67,8 +77,8 @@ MacStarStacker/
 ## 🔨 ビルド方法
 
 ### 前提条件
-- macOS 14 以降
-- Xcode 16 以降（`xcode-select` でXcode本体を選択しておく）
+- macOS 14 以降（ビルド環境。動作対象は macOS 10.13 以降）
+- Xcode 16.x（`xcode-select` でXcode本体を選択しておく。10.13向けのSwiftランタイム同梱に必要）
 - CMake・Ninja（依存ライブラリのビルド用）: `brew install cmake ninja`
 - ExifTool (推奨): `brew install exiftool`
 
@@ -78,7 +88,7 @@ Universal（x86_64 + arm64）の静的ライブラリとして `MacStarStacker.s
 
 ### 開発時のビルド・テスト
 ```bash
-scripts/build_deps.sh 14.0
+scripts/build_deps.sh 10.13
 swift test --package-path MacStarStacker.swiftpm
 ```
 
