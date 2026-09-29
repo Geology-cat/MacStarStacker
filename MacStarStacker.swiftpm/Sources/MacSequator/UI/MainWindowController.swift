@@ -16,11 +16,7 @@ public class MainWindowController: NSWindowController {
         window.setFrameAutosaveName("MacStarStackerMainWindow")
 
         // ダークアピアランス
-        if #available(macOS 10.14, *) {
-            window.appearance = NSAppearance(named: .darkAqua)
-        } else {
-            window.appearance = NSAppearance(named: .vibrantDark)
-        }
+        window.appearance = NSAppearance(named: .darkAqua)
 
         self.init(window: window)
 

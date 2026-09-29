@@ -15,9 +15,7 @@ enum ResetAllConfirmation {
         alert.informativeText = "読み込んだ画像（Light / Dark / Flat / Bias）、スタック結果、マスク、各種設定を破棄して起動時の状態に戻します。この操作は取り消せません。"
         alert.addButton(withTitle: "すべてクリア")
         alert.addButton(withTitle: "キャンセル")
-        if #available(macOS 11.0, *) {
-            alert.buttons.first?.hasDestructiveAction = true
-        }
+        alert.buttons.first?.hasDestructiveAction = true
 
         let handler: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .alertFirstButtonReturn else { return }

@@ -64,12 +64,7 @@ struct TimelapseSettings {
         var avCodec: AVVideoCodecType {
             switch self {
             case .h264: return .h264
-            case .hevc:
-                if #available(macOS 10.13, *) {
-                    return .hevc
-                } else {
-                    return .h264
-                }
+            case .hevc: return .hevc
             }
         }
     }
