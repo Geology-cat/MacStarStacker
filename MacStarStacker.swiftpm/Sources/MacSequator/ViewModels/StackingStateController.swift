@@ -801,7 +801,6 @@ class StackingStateController {
         TimelapseExporter.export(
             imageFiles: lightFiles,
             settings: settings,
-            baseFile: baseImage,
             progress: { [weak self] p, msg in
                 DispatchQueue.main.async {
                     self?.timelapseProgress = p

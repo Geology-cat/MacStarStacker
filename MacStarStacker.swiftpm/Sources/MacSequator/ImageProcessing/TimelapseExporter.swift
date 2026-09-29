@@ -22,7 +22,7 @@ struct TimelapseSettings {
     var fps: Double = 24.0
     var targetDuration: Double = 10.0       // Used when durationMode is .duration
     // ── Stabilization ─────────────────────────────────────────────────
-    var alignFrames: Bool = false           // align each frame to base for stabilization
+    var alignFrames: Bool = false           // 地上の風景で揺れを補正し、最初のフレームに揃える
 
     // ── Deflicker ─────────────────────────────────────────────────────
     var deflicker: Bool = false     // normalize per-frame luminance to reduce flicker
@@ -106,7 +106,6 @@ class TimelapseExporter {
     static func export(
         imageFiles: [ImageFile],
         settings: TimelapseSettings,
-        baseFile: ImageFile?,
         progress: @escaping (Double, String) -> Void,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
@@ -125,7 +124,6 @@ class TimelapseExporter {
                         try renderTimelapse(
                             imageFiles: imageFiles,
                             settings: settings,
-                            baseFile: baseFile,
                             outputURL: url,
                             progress: progress
                         )
@@ -146,7 +144,6 @@ class TimelapseExporter {
     static func renderTimelapse(
         imageFiles: [ImageFile],
         settings: TimelapseSettings,
-        baseFile: ImageFile?,
         outputURL: URL,
         progress: @escaping (Double, String) -> Void
     ) throws {
@@ -220,19 +217,9 @@ class TimelapseExporter {
         let tFps = max(1.0, settings.effectiveFps)
         let frameDuration = CMTime(seconds: 1.0 / tFps, preferredTimescale: 60_000)
 
-        var baseReferenceURL: URL?
-        if settings.alignFrames, let baseFile = baseFile {
-            guard let baseImage = ImageLoader.load(from: baseFile.url),
-                  let tempURL = writeTemporaryTIFF(baseImage, prefix: "timelapse_base") else {
-                throw ExportError(message: "位置合わせの基準画像を準備できませんでした")
-            }
-            baseReferenceURL = tempURL
-        }
-        defer {
-            if let baseReferenceURL = baseReferenceURL {
-                try? FileManager.default.removeItem(at: baseReferenceURL)
-            }
-        }
+        // 星（日周運動で動く）ではなく地上の風景で、隣り合うフレームを順に合わせて最初のフレームに揃える
+        let stabilizer = settings.alignFrames ? TimelapseStabilizer() : nil
+        let identity: [NSNumber] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
         for (idx, file) in selectedFiles.enumerated() {
             DispatchQueue.main.async {
@@ -254,16 +241,15 @@ class TimelapseExporter {
                 nsImage = applyStretch(to: nsImage, gamma: settings.gamma, ev: settings.exposure) ?? nsImage
             }
 
-            if settings.alignFrames,
-               let base = baseFile,
-               let referenceURL = baseReferenceURL,
-               file.url != base.url {
+            if let stabilizer {
                 guard let targetURL = writeTemporaryTIFF(nsImage, prefix: "timelapse_align") else {
                     throw ExportError(message: "位置合わせ用画像を準備できませんでした: \(file.name)")
                 }
                 defer { try? FileManager.default.removeItem(at: targetURL) }
-                let aligned = try ImageAligner.alignImage(at: targetURL, toBaseImageAt: referenceURL)
-                nsImage = aligned
+                let homography = try stabilizer.homographyForImage(at: targetURL)
+                if homography != identity {
+                    nsImage = try ImageAligner.warpImage(at: targetURL, homography: homography)
+                }
             }
 
             guard let pixelBuffer = pixelBuffer(
@@ -300,8 +286,11 @@ class TimelapseExporter {
             throw writer.error ?? ExportError(message: "書き出しに失敗しました")
         }
 
+        let failed = stabilizer?.failedFrameCount ?? 0
         DispatchQueue.main.async {
-            progress(1.0, "✅ タイムラプス書き出し完了！")
+            progress(1.0, failed > 0
+                ? "✅ タイムラプス書き出し完了（\(failed)フレームは揺れ補正できず、そのまま使用）"
+                : "✅ タイムラプス書き出し完了！")
         }
     }
 

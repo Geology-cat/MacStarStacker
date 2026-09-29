@@ -2,12 +2,14 @@
 #import <opencv2/imgproc.hpp>
 #import <opencv2/imgcodecs.hpp>
 #import <opencv2/calib3d.hpp>
+#import <opencv2/features2d.hpp>
 #import <algorithm>
 #import <cmath>
 #import <unordered_map>
 #import <vector>
 
 #import "StarAligner.h"
+#import "TimelapseStabilizer.h"
 
 // ─────────────────────────────────────────────
 //  星の検出
@@ -438,6 +440,138 @@ NSArray<NSNumber *> *ArrayFromMatrix(const cv::Matx33d &h) {
     if (!gray.isContinuous()) gray = gray.clone();
     NSData *data = [NSData dataWithBytesNoCopy:gray.data length:gray.total() * sizeof(float) freeWhenDone:NO];
     return [self homographyFromGray:data initialGuess:initialGuess error:error];
+}
+
+@end
+
+// ─────────────────────────────────────────────
+//  タイムラプスの揺れ補正（星を除いた地上の風景で合わせる）
+// ─────────────────────────────────────────────
+
+namespace {
+
+/// 特徴点を探す画像の長辺（揺れ補正には十分で、フル解像度より大幅に速い）
+const int kStabilizerMaxSide = 1600;
+
+/// 薄明から夜まで明るさが変わっても特徴点が安定して取れるよう、明るさの分布で 8bit に揃える
+cv::Mat NormalizeForFeatures(const cv::Mat &gray) {
+    std::vector<float> samples;
+    samples.reserve(gray.total() / 16 + 1);
+    for (int y = 0; y < gray.rows; y += 4) {
+        const float *row = gray.ptr<float>(y);
+        for (int x = 0; x < gray.cols; x += 4) samples.push_back(row[x]);
+    }
+    const size_t lowIndex = samples.size() / 200, highIndex = samples.size() - 1 - samples.size() / 200;
+    std::nth_element(samples.begin(), samples.begin() + lowIndex, samples.end());
+    const float low = samples[lowIndex];
+    std::nth_element(samples.begin(), samples.begin() + highIndex, samples.end());
+    const float high = std::max(low + 1e-6f, samples[highIndex]);
+    cv::Mat scaled = (gray - low) / (high - low);
+    cv::max(scaled, 0.0, scaled);
+    cv::min(scaled, 1.0, scaled);
+    cv::sqrt(scaled, scaled);  // 暗い地上の模様も拾えるよう持ち上げる
+    cv::Mat result;
+    scaled.convertTo(result, CV_8U, 255.0);
+    return result;
+}
+
+}  // namespace
+
+@implementation TimelapseStabilizer {
+    cv::Mat _previousDescriptors;
+    std::vector<cv::KeyPoint> _previousKeypoints;
+    cv::Size _previousSize;
+    cv::Matx33d _cumulative;
+    bool _hasPrevious;
+    NSInteger _failedFrameCount;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _cumulative = cv::Matx33d::eye();
+        _hasPrevious = false;
+        _failedFrameCount = 0;
+    }
+    return self;
+}
+
+- (NSInteger)failedFrameCount {
+    return _failedFrameCount;
+}
+
+- (nullable NSArray<NSNumber *> *)homographyForImageAtURL:(NSURL *)url error:(NSError **)error {
+    cv::Mat gray = LoadGray(url);
+    if (gray.empty()) {
+        if (error) *error = MakeError(1, @"画像を読み込めませんでした");
+        return nil;
+    }
+    const double scale = std::min(1.0, (double)kStabilizerMaxSide / (double)std::max(gray.cols, gray.rows));
+    cv::Mat small;
+    if (scale < 1.0) {
+        cv::resize(gray, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    } else {
+        small = gray;
+    }
+
+    // 星（日周運動で地上と違う動きをする）の周りを特徴点の対象から外す
+    cv::Mat mask(small.size(), CV_8U, cv::Scalar(255));
+    for (const Star &star : DetectStars(small, cv::Mat())) {
+        cv::circle(mask, cv::Point(cvRound(star.x), cvRound(star.y)), 6, cv::Scalar(0), cv::FILLED);
+    }
+
+    // 高感度の夜空のノイズが特徴点にならないよう、軽くぼかしてから探し、強い特徴点だけを使う
+    cv::Mat normalized = NormalizeForFeatures(small);
+    cv::GaussianBlur(normalized, normalized, cv::Size(0, 0), 1.5);
+    cv::Ptr<cv::AKAZE> akaze = cv::AKAZE::create();
+    std::vector<cv::KeyPoint> keypoints;
+    akaze->detect(normalized, keypoints, mask);
+    cv::KeyPointsFilter::retainBest(keypoints, 4000);
+    cv::Mat descriptors;
+    akaze->compute(normalized, keypoints, descriptors);
+
+    if (_hasPrevious && small.size() == _previousSize) {
+        bool matched = false;
+        if (!descriptors.empty() && !_previousDescriptors.empty()) {
+            cv::BFMatcher matcher(cv::NORM_HAMMING, true);
+            std::vector<cv::DMatch> matches;
+            matcher.match(descriptors, _previousDescriptors, matches);
+            if (matches.size() >= 15) {
+                std::vector<cv::Point2f> from, to;
+                for (const cv::DMatch &m : matches) {
+                    from.push_back(keypoints[m.queryIdx].pt);
+                    to.push_back(_previousKeypoints[m.trainIdx].pt);
+                }
+                cv::Mat inliers;
+                cv::Mat h = cv::findHomography(from, to, cv::RANSAC, 2.0, inliers, 5000, 0.999);
+                const int inlierCount = inliers.empty() ? 0 : cv::countNonZero(inliers);
+                if (!h.empty() && inlierCount >= 15 && inlierCount >= (int)(matches.size() * 0.2)) {
+                    h.convertTo(h, CV_64F);
+                    const cv::Matx33d stepSmall((const double *)h.ptr<double>());
+                    // 縮小画像での変換を元の解像度へ戻す: H = S^-1 * h * S（S は縮小倍率）
+                    const cv::Matx33d s(scale, 0, 0, 0, scale, 0, 0, 0, 1);
+                    const cv::Matx33d sInverse(1.0 / scale, 0, 0, 0, 1.0 / scale, 0, 0, 0, 1);
+                    const cv::Matx33d step = sInverse * stepSmall * s;
+                    // 隣のフレームとの差として大きすぎる動き（画像幅の2割超）は誤推定とみなす
+                    const cv::Point2f center = Project(step, gray.cols * 0.5f, gray.rows * 0.5f);
+                    if (std::hypot(center.x - gray.cols * 0.5f, center.y - gray.rows * 0.5f) < gray.cols * 0.2) {
+                        _cumulative = _cumulative * step;
+                        matched = true;
+                    }
+                }
+            }
+        }
+        if (!matched) _failedFrameCount++;
+    } else if (_hasPrevious) {
+        // 大きさの違うフレームは合わせられない
+        _failedFrameCount++;
+    }
+
+    _previousKeypoints = keypoints;
+    _previousDescriptors = descriptors;
+    _previousSize = small.size();
+    _hasPrevious = true;
+    return ArrayFromMatrix(_cumulative);
 }
 
 @end
