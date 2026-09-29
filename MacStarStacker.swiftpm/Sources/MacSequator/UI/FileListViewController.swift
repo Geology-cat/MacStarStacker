@@ -33,6 +33,8 @@ enum ResetAllConfirmation {
 
 /// 左ペインのファイル一覧・管理ビューコントローラ（macOS 14+）
 public class FileListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    /// プログラムから選択し直している間は、選択の変更をプレビューの切り替えとして扱わない
+    private var isSyncingSelection = false
 
     private let segmentedTypePicker = NSSegmentedControl()
     private let tableView = NSTableView()
@@ -231,6 +233,27 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         resetAllButton.isEnabled = state.canResetAll
 
         tableView.reloadData()
+        selectDisplayedRow()
+    }
+
+    /// プレビューに表示中のファイル（スタック結果を表示中は nil）。キャンバスと同じ決め方
+    private var displayedFile: ImageFile? {
+        let state = StackingStateController.shared
+        if state.showResult, state.stackedResult != nil { return nil }
+        return state.previewImage ?? state.baseImage
+    }
+
+    /// 再読み込みで消える選択を、プレビューに表示中のファイルの行に戻す
+    private func selectDisplayedRow() {
+        let files = StackingStateController.shared.images[currentType] ?? []
+        isSyncingSelection = true
+        defer { isSyncingSelection = false }
+        if let displayed = displayedFile, let row = files.firstIndex(where: { $0.id == displayed.id }) {
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.scrollRowToVisible(row)
+        } else {
+            tableView.deselectAll(nil)
+        }
     }
 
     // MARK: - NSTableViewDataSource & Delegate
@@ -254,6 +277,7 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         cell?.configure(
             file: file,
             isBase: isBase,
+            isDisplayed: displayedFile?.id == file.id,
             onSetBase: { [weak self] in
                 StackingStateController.shared.baseImage = file
                 StackingStateController.shared.previewImage = file
@@ -269,6 +293,7 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !isSyncingSelection else { return }
         let row = tableView.selectedRow
         guard row >= 0, let files = StackingStateController.shared.images[currentType], row < files.count else { return }
         let file = files[row]
@@ -287,6 +312,7 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         default: currentType = .light
         }
         tableView.reloadData()
+        selectDisplayedRow()
     }
 
     @objc private func onAddClicked() {
@@ -314,6 +340,8 @@ class FileTableCellView: NSTableCellView {
     private let fileNameLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(labelWithString: "")
     private let removeButton = NSButton()
+    /// プレビューに表示中の行の目印（左端の帯）
+    private let displayedMarker = NSView()
 
     private var onSetBase: (() -> Void)?
     private var onRemove: (() -> Void)?
@@ -329,6 +357,13 @@ class FileTableCellView: NSTableCellView {
     }
 
     private func setupCell() {
+        displayedMarker.translatesAutoresizingMaskIntoConstraints = false
+        displayedMarker.wantsLayer = true
+        displayedMarker.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        displayedMarker.layer?.cornerRadius = 1.5
+        displayedMarker.isHidden = true
+        addSubview(displayedMarker)
+
         starButton.translatesAutoresizingMaskIntoConstraints = false
         starButton.bezelStyle = .inline
         starButton.isBordered = false
@@ -357,6 +392,11 @@ class FileTableCellView: NSTableCellView {
         addSubview(removeButton)
 
         NSLayoutConstraint.activate([
+            displayedMarker.leadingAnchor.constraint(equalTo: leadingAnchor),
+            displayedMarker.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            displayedMarker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            displayedMarker.widthAnchor.constraint(equalToConstant: 3),
+
             starButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             starButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             starButton.widthAnchor.constraint(equalToConstant: 20),
@@ -378,11 +418,16 @@ class FileTableCellView: NSTableCellView {
         ])
     }
 
-    public func configure(file: ImageFile, isBase: Bool, onSetBase: @escaping () -> Void, onRemove: @escaping () -> Void) {
+    public func configure(file: ImageFile, isBase: Bool, isDisplayed: Bool,
+                          onSetBase: @escaping () -> Void, onRemove: @escaping () -> Void) {
         self.onSetBase = onSetBase
         self.onRemove = onRemove
 
         fileNameLabel.stringValue = file.name
+        // プレビューに表示中のファイルは、左端の帯と太字で示す
+        displayedMarker.isHidden = !isDisplayed
+        fileNameLabel.font = isDisplayed ? NSFont.boldSystemFont(ofSize: 11) : NSFont.systemFont(ofSize: 11)
+        toolTip = isDisplayed ? "プレビューに表示中" : nil
         subtitleLabel.stringValue = file.subtitle
 
         starButton.title = isBase ? "★" : "☆"
