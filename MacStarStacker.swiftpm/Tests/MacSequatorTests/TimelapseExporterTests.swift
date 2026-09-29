@@ -45,7 +45,6 @@ final class TimelapseExporterTests: XCTestCase {
             try TimelapseExporter.renderTimelapse(
                 imageFiles: files,
                 settings: settings,
-                baseFile: files.first,
                 outputURL: output,
                 progress: { _, _ in }
             )
