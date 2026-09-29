@@ -209,6 +209,104 @@ final class NightscapeTests: XCTestCase {
         try check(starStep: (0, 0), groundStep: (-2, 2), label: "追尾撮影")
     }
 
+    func testSmallRelativeShiftLeavesNoStarGhostsNearTheHorizon() throws {
+        // 星と地上の動きの差が小さい（8枚で合計3.5px）と、地上に合わせた星のない空にも星が短い線として残る。
+        // それを地平線付近に比較明で重ねても、星の横に伸びた像・二重の像が出ないこと
+        let starStep = (0.5, 0.0)
+        let mask = NightscapeMask(skyAlpha: truthAlpha(), width: width, height: height)
+        let output = try compose(starStep: starStep, groundStep: (0, 0), mask: mask)
+        let ideal = pixels(render(starShift: (0, 0), groundShift: (0, 0), seed: 1, noise: false).rgb)
+        var ghostPixels = 0, count = 0
+        for x in 0..<width where !(0..<width).contains(where: { abs($0 - x) < 4 && isTree($0, Int(ridge($0)) - 5) }) {
+            for d in 3...60 {
+                let y = Int(ridge(x)) - d
+                guard y >= 0, !isGround(x, y) else { continue }
+                count += 1
+                if output[y * width + x] - ideal[y * width + x] > 500 { ghostPixels += 1 }
+            }
+        }
+        XCTAssertLessThan(Double(ghostPixels) / Double(max(1, count)), 0.002,
+                          "地平線付近の空に星の横に伸びた像が出ないこと（\(ghostPixels)/\(count) 画素）")
+    }
+
+    /// 海の星景: 水平線（y=200）の下はなだらかな海（模様が無く星も写らない）、上は地平線付近ほど明るい光害と星。
+    /// 左右に岩肌の崖がある。海と光害は地上に対して動かず、星だけが動く（固定撮影）
+    private func renderSeascape(starShift: (Double, Double), seed: UInt64) -> (rgb: Data, gray: Data) {
+        var random = Random(state: seed)
+        let horizon = 200
+        func isCliff(_ x: Int, _ y: Int) -> Bool { (x < 70 && y >= 40 + x) || (x >= 420 && y >= 150 - (x - 420)) }
+        var image = [Float](repeating: 0, count: width * height)
+        var kind = [UInt8](repeating: 0, count: width * height)  // 0=空 1=海 2=崖
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * width + x
+                if isCliff(x, y) {
+                    image[i] = groundTexture[i]; kind[i] = 2
+                } else if y >= horizon {
+                    image[i] = 1300; kind[i] = 1
+                } else {
+                    // 地平線に近いほど明るい光害（地上に対して動かない）
+                    image[i] = skyLevel + 4000 * Float(exp(-Double(horizon - y) / 25))
+                }
+                image[i] += Float((random.next() - 0.5) * 200)
+            }
+        }
+        for star in stars {
+            let cx = star.x + starShift.0, cy = star.y + starShift.1
+            let top = max(0, Int(cy) - 4), bottom = min(height - 1, Int(cy) + 4)
+            let left = max(0, Int(cx) - 4), right = min(width - 1, Int(cx) + 4)
+            guard top <= bottom, left <= right else { continue }
+            for y in top...bottom {
+                for x in left...right where kind[y * width + x] == 0 {
+                    let d2 = pow(Double(x) - cx, 2) + pow(Double(y) - cy, 2)
+                    image[y * width + x] += Float(star.brightness * exp(-d2 / (2 * 1.2 * 1.2)))
+                }
+            }
+        }
+        var rgb = [UInt16](repeating: 0, count: width * height * 3)
+        for i in image.indices {
+            // 空は青み、海は空より暗く色が浅い、崖は暖色
+            let (r, b): (Float, Float) = kind[i] == 2 ? (1.15, 0.8) : (kind[i] == 1 ? (0.95, 1.05) : (0.85, 1.2))
+            rgb[i * 3] = UInt16(max(0, min(65535, image[i] * r)))
+            rgb[i * 3 + 1] = UInt16(max(0, min(65535, image[i])))
+            rgb[i * 3 + 2] = UInt16(max(0, min(65535, image[i] * b)))
+        }
+        let gray = (0..<(width * height)).map { i in
+            (Float(rgb[i * 3]) + Float(rgb[i * 3 + 1]) + Float(rgb[i * 3 + 2])) / 3
+        }
+        return (rgb.withUnsafeBufferPointer { Data(buffer: $0) }, gray.withUnsafeBufferPointer { Data(buffer: $0) })
+    }
+
+    func testSmoothSeaIsGroundAndHorizonGlowIsSky() throws {
+        // 地平線付近の光害は地上に対して動かないため、明るさのばらつきだけで判定すると地上と取り違え、
+        // 光害の中の星が消える。模様の無い海は手がかりが無く、空と同じ扱いになると水平線がぼける
+        let analyzer = NightscapeAnalyzer(width: width, height: height)
+        let starStep = (2.5, -1.0)
+        for i in 0..<frameCount {
+            let frame = renderSeascape(starShift: (starStep.0 * Double(i), starStep.1 * Double(i)), seed: UInt64(300 + i))
+            try analyzer.addFrameGray(frame.gray, rgb: frame.rgb,
+                                      starHomography: translation(-starStep.0 * Double(i), -starStep.1 * Double(i)),
+                                      groundHomography: translation(0, 0))
+        }
+        let mask = try analyzer.segment(withHints: nil)
+        XCTAssertTrue(mask.hasBothRegions)
+        let alpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        var seaAsGround = 0, seaCount = 0, glowAsSky = 0, glowCount = 0
+        for y in 0..<height {
+            for x in 100..<380 {
+                if y >= 210 && y < 300 {
+                    seaCount += 1
+                    if alpha[y * width + x] < 0.5 { seaAsGround += 1 }
+                } else if y >= 165 && y < 195 {
+                    glowCount += 1
+                    if alpha[y * width + x] >= 0.5 { glowAsSky += 1 }
+                }
+            }
+        }
+        XCTAssertGreaterThan(Double(seaAsGround) / Double(seaCount), 0.9, "水平線の下の海は地上")
+        XCTAssertGreaterThan(Double(glowAsSky) / Double(glowCount), 0.9, "水平線の上の光害（星が写る）は空")
+    }
+
     func testAutomaticSegmentationMatchesTheScene() throws {
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let starStep = (2.0, 3.0)
