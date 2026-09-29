@@ -21,12 +21,23 @@ public class CanvasViewController: NSViewController {
     private let statusLabel = NSTextField(labelWithString: "")
     private var stateChangeObserver: NSObjectProtocol?
     private var stateResetObserver: NSObjectProtocol?
-    private var cachedPreviewFileID: UUID?
-    private var cachedPreviewAutoStretch: Bool?
-    private var cachedPreviewImage: NSImage?
-    /// 読み込み中のプレビュー（RAWはLibRawでの現像に数秒かかるため、メインスレッドを止めずに読み込む）
-    private var loadingPreviewFileID: UUID?
-    private var loadingPreviewAutoStretch: Bool?
+
+    /// プレビューは（ファイル, Auto Stretch）ごとに保持する。RAWはLibRawでの現像に数秒かかるため、
+    /// メインスレッドを止めずに読み込み、読み込み中は直前の画像を表示し続ける。
+    private struct PreviewKey: Hashable {
+        let fileID: UUID
+        let autoStretch: Bool
+    }
+    /// 保持するプレビューの数（1枚が数百MBになるため、表示中のファイルの ON/OFF 分だけ）
+    private let previewCacheLimit = 2
+    private var previewCache: [PreviewKey: NSImage] = [:]
+    private var previewCacheOrder: [PreviewKey] = []
+    private var loadingPreviewKeys: Set<PreviewKey> = []
+    private var failedPreviewKeys: Set<PreviewKey> = []
+    /// 読み込み中に表示し続ける、直前に表示したプレビュー
+    private var lastShownPreview: NSImage?
+    /// 表示したいプレビューがまだ読み込み中か
+    private var isPreviewLoading = false
 
     override public func loadView() {
         let dropView = ImageDropView()
@@ -70,11 +81,12 @@ public class CanvasViewController: NSViewController {
 
     /// 「すべてクリア」時に、表示倍率とプレビューキャッシュを起動時の状態へ戻す。
     private func resetViewState() {
-        cachedPreviewFileID = nil
-        cachedPreviewAutoStretch = nil
-        cachedPreviewImage = nil
-        loadingPreviewFileID = nil
-        loadingPreviewAutoStretch = nil
+        previewCache = [:]
+        previewCacheOrder = []
+        loadingPreviewKeys = []
+        failedPreviewKeys = []
+        lastShownPreview = nil
+        isPreviewLoading = false
         canvasView.zoomScale = 1.0
         canvasView.panOffset = .zero
         updateState()
@@ -218,17 +230,18 @@ public class CanvasViewController: NSViewController {
 
         // プレビュー表示する画像の決定
         let displayImg: NSImage?
+        isPreviewLoading = false
         if state.showResult, let result = state.stackedResult {
             displayImg = result
             fileNameLabel.stringValue = "スタック結果"
             fileNameLabel.textColor = .systemGreen
         } else if let preview = state.previewImage {
             displayImg = previewImage(for: preview, autoStretch: state.enableAutoStretch)
-            fileNameLabel.stringValue = displayImg == nil ? "\(preview.name)（読み込み中…）" : preview.name
+            fileNameLabel.stringValue = isPreviewLoading ? "\(preview.name)（読み込み中…）" : preview.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else if let base = state.baseImage {
             displayImg = previewImage(for: base, autoStretch: state.enableAutoStretch)
-            fileNameLabel.stringValue = displayImg == nil ? "\(base.name)（読み込み中…）" : base.name
+            fileNameLabel.stringValue = isPreviewLoading ? "\(base.name)（読み込み中…）" : base.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else {
             displayImg = nil
@@ -236,8 +249,9 @@ public class CanvasViewController: NSViewController {
         }
 
         canvasView.currentImage = displayImg
+        // 読み込み中は直前の（別の）画像を表示しているため、マスクを描けないようにする
         canvasView.isMaskEditingEnabled = state.enableSkyGroundMask
-            && !state.showResult && !state.isStacking && displayImg != nil
+            && !state.showResult && !state.isStacking && displayImg != nil && !isPreviewLoading
         canvasView.synchronizeMask(from: state.maskBitmap)
 
         // スタック結果トグルボタンの表示
@@ -260,30 +274,45 @@ public class CanvasViewController: NSViewController {
         zoomLabel.stringValue = "\(Int(round(canvasView.zoomScale * 100)))%"
     }
 
-    /// 読み込み済みならその画像を返す。未読み込みならバックグラウンドで読み込みを始めて nil を返し、
-    /// 読み込み後に表示を更新する（読み込み中はマスク編集もできない）。
+    /// 読み込み済みならその画像を返す。未読み込みならバックグラウンドで読み込みを始め、読み込み中は
+    /// 直前に表示した画像を返す（isPreviewLoading が true になる）。読み込み後に表示を更新する。
     private func previewImage(for file: ImageFile, autoStretch: Bool) -> NSImage? {
-        if cachedPreviewFileID == file.id, cachedPreviewAutoStretch == autoStretch {
-            return cachedPreviewImage
+        let key = PreviewKey(fileID: file.id, autoStretch: autoStretch)
+        if let cached = previewCache[key] {
+            lastShownPreview = cached
+            return cached
         }
-        guard loadingPreviewFileID != file.id || loadingPreviewAutoStretch != autoStretch else { return nil }
-        loadingPreviewFileID = file.id
-        loadingPreviewAutoStretch = autoStretch
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let image = StackingStateController.shared.loadNSImage(from: file, autoStretch: autoStretch)
-            DispatchQueue.main.async {
-                // 読み込み中に別の画像が選ばれた場合は結果を捨てる
-                guard let self, self.loadingPreviewFileID == file.id,
-                      self.loadingPreviewAutoStretch == autoStretch else { return }
-                self.loadingPreviewFileID = nil
-                self.loadingPreviewAutoStretch = nil
-                self.cachedPreviewFileID = file.id
-                self.cachedPreviewAutoStretch = autoStretch
-                self.cachedPreviewImage = image
-                self.updateState()
+        if failedPreviewKeys.contains(key) {
+            lastShownPreview = nil
+            return nil
+        }
+        isPreviewLoading = true
+        if !loadingPreviewKeys.contains(key) {
+            loadingPreviewKeys.insert(key)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let image = StackingStateController.shared.loadNSImage(from: file, autoStretch: autoStretch)
+                DispatchQueue.main.async {
+                    guard let self, self.loadingPreviewKeys.remove(key) != nil else { return }
+                    // 読み込み中に別の画像や設定に切り替わっていても結果は保持し、表示は最新の選択に従う
+                    if let image {
+                        self.storePreview(image, for: key)
+                    } else {
+                        self.failedPreviewKeys.insert(key)
+                    }
+                    self.updateState()
+                }
             }
         }
-        return nil
+        return lastShownPreview
+    }
+
+    private func storePreview(_ image: NSImage, for key: PreviewKey) {
+        previewCache[key] = image
+        previewCacheOrder.removeAll { $0 == key }
+        previewCacheOrder.append(key)
+        while previewCacheOrder.count > previewCacheLimit {
+            previewCache[previewCacheOrder.removeFirst()] = nil
+        }
     }
 
     // MARK: - アクション
