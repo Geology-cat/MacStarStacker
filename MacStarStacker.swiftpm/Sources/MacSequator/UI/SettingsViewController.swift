@@ -229,7 +229,7 @@ public class SettingsViewController: NSViewController {
         stackModePopup.action = #selector(onStackModeChanged)
 
         alignCheckbox.translatesAutoresizingMaskIntoConstraints = false
-        alignCheckbox.state = StackingStateController.shared.enableAlignment ? .on : .off
+        alignCheckbox.state = StackingStateController.shared.isAlignmentEnabledForCurrentMode ? .on : .off
         alignCheckbox.target = self
         alignCheckbox.action = #selector(onAlignToggled)
 
@@ -784,13 +784,11 @@ public class SettingsViewController: NSViewController {
 
         // スタック設定・光跡除去更新
         let isCompareBright = (state.stackMode == "Compare Bright")
-        // 比較明合成で位置合わせすると星の軌跡が点に戻るため、常にOFFにする。
-        alignCheckbox.isEnabled = !isCompareBright
-        if isCompareBright {
-            alignCheckbox.state = .off
-        } else {
-            alignCheckbox.state = state.enableAlignment ? .on : .off
-        }
+        // 比較明合成でも選べる（星を合わせると星の軌跡が点になるため、比較明合成の既定はOFF）
+        alignCheckbox.state = state.isAlignmentEnabledForCurrentMode ? .on : .off
+        alignCheckbox.toolTip = isCompareBright
+            ? "ONにすると星の位置を合わせて合成します（星は軌跡ではなく点になります）"
+            : "星の位置を合わせて合成します"
         trailRemovalCheckbox.isHidden = !isCompareBright
         trailRemovalCheckbox.state = state.enableTrailRemoval ? .on : .off
 
@@ -918,13 +916,12 @@ public class SettingsViewController: NSViewController {
         case 1: StackingStateController.shared.stackMode = "Median"
         case 2:
             StackingStateController.shared.stackMode = "Compare Bright"
-            StackingStateController.shared.enableAlignment = false
         default: StackingStateController.shared.stackMode = "Average"
         }
     }
 
     @objc private func onAlignToggled() {
-        StackingStateController.shared.enableAlignment = (alignCheckbox.state == .on)
+        StackingStateController.shared.isAlignmentEnabledForCurrentMode = (alignCheckbox.state == .on)
     }
 
     @objc private func onTrailRemovalToggled() {

@@ -209,11 +209,16 @@ enum RawStackPipeline {
 
         func demosaic(_ index: Int) throws -> CameraRGBFrame {
             let url = input.lights[index]
-            if calibrator.isIdentity {
+            // 比較明合成の光跡除去は、位置合わせ前（撮影したままの位置）のマスクで行う
+            let trailMasks = input.mode == .compareBright ? (input.trailMasks[index] ?? []) : []
+            if calibrator.isIdentity && trailMasks.isEmpty {
                 return try RawDecoder.demosaicCameraRGB(from: url)
             }
             var bayer = try RawDecoder.readBayer(from: url)
             try requireCompatible(bayer.info, info, url: url)
+            if !trailMasks.isEmpty {
+                try removeTrails(from: &bayer.pixels, info: info, masks: trailMasks, index: index, lights: input.lights)
+            }
             calibrator.apply(to: &bayer.pixels)
             return try RawDecoder.demosaicCameraRGB(from: url, replacementBayer: bayer.pixels)
         }

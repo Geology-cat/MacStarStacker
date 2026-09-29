@@ -35,6 +35,17 @@ class StackingStateController {
     /// Light画像を読み込んだ直後は撮って出しの明るさで確認できるよう、既定はOFF
     var enableAutoStretch: Bool = false { didSet { if oldValue != enableAutoStretch { notifyStateChanged() } } }
     var enableAlignment: Bool = true { didSet { if oldValue != enableAlignment { notifyStateChanged() } } }
+    /// 比較明合成での位置合わせ。星を合わせると星の軌跡が点になるため、平均・中央値とは別に持ち、既定はOFF
+    var enableCompareBrightAlignment: Bool = false {
+        didSet { if oldValue != enableCompareBrightAlignment { notifyStateChanged() } }
+    }
+    /// 現在のスタック方式での位置合わせの設定
+    var isAlignmentEnabledForCurrentMode: Bool {
+        get { stackMode == "Compare Bright" ? enableCompareBrightAlignment : enableAlignment }
+        set {
+            if stackMode == "Compare Bright" { enableCompareBrightAlignment = newValue } else { enableAlignment = newValue }
+        }
+    }
     var stackMode: String = "Average" { didSet { if oldValue != stackMode { notifyStateChanged() } } } // "Average", "Median", "Compare Bright"
     /// ON のときだけ空・地上マスクの編集と分離合成を有効にする。
     var enableSkyGroundMask: Bool = false { didSet { if oldValue != enableSkyGroundMask { notifyStateChanged() } } }
@@ -236,6 +247,7 @@ class StackingStateController {
 
         enableAutoStretch = defaults.enableAutoStretch
         enableAlignment = defaults.enableAlignment
+        enableCompareBrightAlignment = defaults.enableCompareBrightAlignment
         stackMode = defaults.stackMode
         enableSkyGroundMask = defaults.enableSkyGroundMask
         maskBitmap = nil
@@ -444,7 +456,7 @@ class StackingStateController {
         let mode       = stackMode
         let useSkyGroundMask = enableSkyGroundMask
         // 比較明合成では星の軌跡を保つため、アライメントを強制的に無効化する。
-        let doAlign    = (mode == "Compare Bright") ? false : enableAlignment
+        let doAlign    = isAlignmentEnabledForCurrentMode
         let mask       = useSkyGroundMask ? maskBitmap : nil
         let maskFeather = maskFeatherRadius
         let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
