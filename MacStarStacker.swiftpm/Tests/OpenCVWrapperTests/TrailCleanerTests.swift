@@ -14,6 +14,8 @@ final class TrailCleanerTests: XCTestCase {
         diagonalLine: Bool = false
     ) -> NSImage {
         var pixels = [UInt8](repeating: value, count: width * height * 4)
+        // 不透明な画像にする（写真と同じ条件）。光跡の有無でフレームの透明度が変わらないようにする
+        for index in stride(from: 3, to: pixels.count, by: 4) { pixels[index] = 255 }
         if line {
             for x in 20..<(width - 20) {
                 let centerY = diagonalLine
@@ -29,8 +31,6 @@ final class TrailCleanerTests: XCTestCase {
                     pixels[index + 3] = 255
                 }
             }
-        } else {
-            for index in stride(from: 3, to: pixels.count, by: 4) { pixels[index] = 255 }
         }
         if secondLine {
             for y in (height / 4 - 1)...(height / 4 + 1) {
@@ -195,6 +195,46 @@ final class TrailCleanerTests: XCTestCase {
         }
         let results = TrailCleaner.detectTrails(inImageURLs: urls, progressCallback: nil)
         XCTAssertTrue(results.contains { $0.frameIndex == 2 && $0.detectedType.contains("人工衛星") })
+    }
+
+    func testTransparentPixelsAreLoadedIndependentlyOfLeftoverMemory() throws {
+        // 透明な部分のある画像は下地と合成される。下地が未初期化のメモリだと、直前に使われたメモリの
+        // 内容で結果が変わる（全テストを続けて実行したときだけ検出結果が変わっていた原因）。
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let width = 240, height = 160
+        let urls = try (0..<3).map { index -> URL in
+            // 全面が透明な画像（光跡も背景も無い）
+            let pixels = [UInt8](repeating: 0, count: width * height * 4)
+            let provider = CGDataProvider(data: Data(pixels) as CFData)!
+            let cgImage = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+            let url = directory.appendingPathComponent("transparent_\(index).png")
+            try write(NSImage(cgImage: cgImage, size: NSSize(width: width, height: height)), to: url)
+            return url
+        }
+        for _ in 0..<5 {
+            // 読み込みと同じ大きさのメモリを明るい値で埋めて解放し、次の確保で再利用されやすくする
+            for _ in 0..<8 {
+                let buffer = UnsafeMutableRawPointer.allocate(byteCount: width * height * 4, alignment: 64)
+                buffer.initializeMemory(as: UInt8.self, repeating: 0xFF, count: width * height * 4)
+                buffer.deallocate()
+            }
+            // 光跡マスクが無いときは、読み込んだ画像がそのまま返る
+            let loaded = try XCTUnwrap(TrailCleaner.inpaintImage(at: urls[0], withMasks: [], prevFrameURL: nil, nextFrameURL: nil))
+            let cgImage = try XCTUnwrap(loaded.cgImage(forProposedRect: nil, context: nil, hints: nil))
+            let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            let bytes = try XCTUnwrap(context.data).bindMemory(to: UInt8.self, capacity: width * height * 4)
+            let brightest = (0..<(width * height)).map { max(bytes[$0 * 4], bytes[$0 * 4 + 1], bytes[$0 * 4 + 2]) }.max() ?? 0
+            XCTAssertLessThanOrEqual(brightest, 1, "透明な部分は黒の下地に合成されること（前に使われたメモリの内容が混ざらない）")
+        }
+        XCTAssertTrue(TrailCleaner.detectTrails(inImageURLs: urls, progressCallback: nil).isEmpty)
     }
 
     func testFaintTrailSurvives4KWidthDownsampling() throws {
