@@ -37,9 +37,8 @@ struct TimelapseSettings {
     var deflicker: Bool = false     // normalize per-frame luminance to reduce flicker
 
     // ── Tone / Stretch ────────────────────────────────────────────────
-    var autoStretch: Bool = false   // apply gamma + exposure to each frame for preview-quality output
-    var gamma: Double = 0.45
-    var exposure: Double = 1.0      // EV boost
+    /// 暗部を持ち上げる（補正量は最初のフレームの明るさの分布で決め、全フレームに同じ補正をかける）
+    var autoStretch: Bool = false
 
     // ── Output resolution ─────────────────────────────────────────────
     var resolution: OutputResolution = .original
@@ -234,6 +233,7 @@ class TimelapseExporter {
         case .stars:  stabilizer = StarTimelapseAligner()
         }
         let identity: [NSNumber] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        var stretchParameters: AutoStretch.Parameters?
 
         for (idx, file) in selectedFiles.enumerated() {
             DispatchQueue.main.async {
@@ -268,8 +268,13 @@ class TimelapseExporter {
                 nsImage = scaleLuminance(image: nsImage, factor: deflickerFactor) ?? nsImage
             }
 
-            if settings.autoStretch {
-                nsImage = applyStretch(to: nsImage, gamma: settings.gamma, ev: settings.exposure) ?? nsImage
+            if settings.autoStretch, let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                // フレームごとに補正量を変えると明るさがちらつくため、最初のフレームで決めた補正を使い続ける
+                let parameters = stretchParameters ?? AutoStretch.parameters(for: cgImage)
+                stretchParameters = parameters
+                if let stretched = AutoStretch.apply(parameters, to: cgImage) {
+                    nsImage = NSImage(cgImage: stretched, size: nsImage.size)
+                }
             }
 
             guard let pixelBuffer = pixelBuffer(
@@ -349,22 +354,6 @@ class TimelapseExporter {
         return NSImage(cgImage: cg, size: image.size)
     }
 
-    private static func applyStretch(to image: NSImage, gamma: Double, ev: Double) -> NSImage? {
-        guard let ci = CIImage(data: image.tiffRepresentation ?? Data()) else { return nil }
-        guard let g = CIFilter(name: "CIGammaAdjust") else { return nil }
-        g.setValue(ci, forKey: kCIInputImageKey)
-        g.setValue(Float(gamma), forKey: "inputPower")
-        guard let gOut = g.outputImage else { return nil }
-        
-        guard let e = CIFilter(name: "CIExposureAdjust") else { return nil }
-        e.setValue(gOut, forKey: kCIInputImageKey)
-        e.setValue(Float(ev), forKey: "inputEV")
-        guard let out = e.outputImage else { return nil }
-        
-        let ctx = CIContext()
-        guard let cg = ctx.createCGImage(out, from: out.extent) else { return nil }
-        return NSImage(cgImage: cg, size: image.size)
-    }
 
     private static func pixelBuffer(from image: NSImage, width: Int, height: Int) -> CVPixelBuffer? {
         var pb: CVPixelBuffer?
