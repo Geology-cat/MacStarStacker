@@ -73,6 +73,12 @@ swift test --package-path MacStarStacker.swiftpm
 bash MacStarStacker.swiftpm/build_app.sh
 ```
 
+- 新星景モード（`NightscapeCompositor` / `Nightscape.mm`）を実データで確かめるときは、環境変数を指定して確認用テストを動かす
+  （指定しないときはスキップされる）。合成結果（`nightscape.tiff`・`pixels.raw`）と自動判定の結果（`sky_alpha.png`）が書き出される。
+  ```bash
+  NIGHTSCAPE_SAMPLE_DIR=<RAWのフォルダ> NIGHTSCAPE_OUTPUT_DIR=<書き出し先> NIGHTSCAPE_BASE_INDEX=<基準の番号> \
+    swift test --package-path MacStarStacker.swiftpm --filter NightscapeSampleTests/testComposeSampleFolder
+  ```
 - `swift test` はビルドしているMacのアーキテクチャだけで動く。開発用のMacはIntelなので、arm64 版は実行して確認できない。
 - 10.13 での実際の動作は、10.13 の仮想マシンか実機で確認する必要がある（CIでは実行できない）。
 
