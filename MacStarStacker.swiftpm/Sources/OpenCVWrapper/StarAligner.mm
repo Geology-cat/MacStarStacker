@@ -10,6 +10,7 @@
 
 #import "StarAligner.h"
 #import "TimelapseStabilizer.h"
+#import "GroundAligner.h"
 
 // ─────────────────────────────────────────────
 //  星の検出
@@ -572,6 +573,155 @@ cv::Mat NormalizeForFeatures(const cv::Mat &gray) {
     _previousSize = small.size();
     _hasPrevious = true;
     return ArrayFromMatrix(_cumulative);
+}
+
+@end
+
+// ─────────────────────────────────────────────
+//  新星景モードの地上の位置合わせ（星を除いた地上の特徴点で、基準画像に直接合わせる）
+// ─────────────────────────────────────────────
+
+namespace {
+
+/// 地上の特徴点を探す画像の長辺。タイムラプスの揺れ補正より細かく合わせるため大きめにする
+const int kGroundMaxSide = 2400;
+
+struct GroundFeatures {
+    std::vector<cv::KeyPoint> keypoints;
+    cv::Mat descriptors;
+};
+
+/// 星の周りを除いた地上の特徴点（縮小画像の座標）
+GroundFeatures DetectGroundFeatures(const cv::Mat &gray, double scale) {
+    cv::Mat small;
+    if (scale < 1.0) {
+        cv::resize(gray, small, cv::Size(), scale, scale, cv::INTER_AREA);
+    } else {
+        small = gray;
+    }
+    cv::Mat mask(small.size(), CV_8U, cv::Scalar(255));
+    for (const Star &star : DetectStars(small, cv::Mat())) {
+        cv::circle(mask, cv::Point(cvRound(star.x), cvRound(star.y)), 6, cv::Scalar(0), cv::FILLED);
+    }
+    cv::Mat normalized = NormalizeForFeatures(small);
+    cv::GaussianBlur(normalized, normalized, cv::Size(0, 0), 1.2);
+    cv::Ptr<cv::AKAZE> akaze = cv::AKAZE::create();
+    GroundFeatures features;
+    akaze->detect(normalized, features.keypoints, mask);
+    cv::KeyPointsFilter::retainBest(features.keypoints, 6000);
+    akaze->compute(normalized, features.keypoints, features.descriptors);
+    return features;
+}
+
+}  // namespace
+
+@implementation GroundAligner {
+    GroundFeatures _base;
+    double _scale;
+    NSInteger _width;
+    NSInteger _height;
+}
+
+- (nullable instancetype)initWithBaseGray:(NSData *)gray
+                                    width:(NSInteger)width
+                                   height:(NSInteger)height
+                                    error:(NSError **)error {
+    self = [super init];
+    if (!self) return nil;
+    cv::Mat image = MatFromGray(gray, width, height);
+    if (image.empty()) {
+        if (error) *error = MakeError(1, @"位置合わせ用の画素データが不正です");
+        return nil;
+    }
+    _width = width;
+    _height = height;
+    _scale = std::min(1.0, (double)kGroundMaxSide / (double)std::max(width, height));
+    _base = DetectGroundFeatures(image, _scale);
+    if ((int)_base.keypoints.size() < 20) {
+        if (error) {
+            *error = MakeError(5, [NSString stringWithFormat:@"基準画像で地上の特徴点が十分に見つかりませんでした（%d 個）",
+                                                             (int)_base.keypoints.size()]);
+        }
+        return nil;
+    }
+    return self;
+}
+
+- (nullable NSArray<NSNumber *> *)homographyFromGray:(NSData *)gray
+                                        initialGuess:(nullable NSArray<NSNumber *> *)initialGuess
+                                               error:(NSError **)error {
+    cv::Mat image = MatFromGray(gray, _width, _height);
+    if (image.empty()) {
+        if (error) *error = MakeError(1, @"位置合わせ用の画素データが不正です");
+        return nil;
+    }
+    const GroundFeatures target = DetectGroundFeatures(image, _scale);
+    if (target.descriptors.empty() || _base.descriptors.empty()) {
+        if (error) *error = MakeError(5, @"地上の特徴点が見つかりませんでした");
+        return nil;
+    }
+
+    // 縮小画像の座標での予想変換（full → small: S * H * S^-1）
+    const cv::Matx33d s(_scale, 0, 0, 0, _scale, 0, 0, 0, 1);
+    const cv::Matx33d sInverse(1.0 / _scale, 0, 0, 0, 1.0 / _scale, 0, 0, 0, 1);
+    bool hasGuess = initialGuess.count == 9;
+    cv::Matx33d guessSmall = cv::Matx33d::eye();
+    if (hasGuess) {
+        cv::Matx33d guess;
+        for (int i = 0; i < 9; i++) guess(i / 3, i % 3) = initialGuess[i].doubleValue;
+        guessSmall = s * guess * sInverse;
+    }
+
+    // 特徴の似た候補（上位2つ）から、1位が明確で、予想変換とも矛盾しない対応だけを使う
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<std::vector<cv::DMatch>> candidates;
+    matcher.knnMatch(target.descriptors, _base.descriptors, candidates, 2);
+    std::vector<cv::Point2f> from, to;
+    for (const std::vector<cv::DMatch> &pair : candidates) {
+        if (pair.empty()) continue;
+        if (pair.size() > 1 && pair[0].distance > 0.8f * pair[1].distance) continue;
+        const cv::Point2f p = target.keypoints[pair[0].queryIdx].pt;
+        const cv::Point2f q = _base.keypoints[pair[0].trainIdx].pt;
+        if (hasGuess) {
+            const cv::Point2f predicted = Project(guessSmall, p.x, p.y);
+            if (std::hypot(predicted.x - q.x, predicted.y - q.y) > 30.0) continue;
+        }
+        from.push_back(p);
+        to.push_back(q);
+    }
+    if ((int)from.size() < 20) {
+        if (error) *error = MakeError(6, [NSString stringWithFormat:@"地上の特徴点の対応が不足しています（%d 組）", (int)from.size()]);
+        return nil;
+    }
+    cv::Mat inliers;
+    cv::Mat h = cv::findHomography(from, to, cv::RANSAC, 1.5, inliers, 5000, 0.999);
+    const int inlierCount = inliers.empty() ? 0 : cv::countNonZero(inliers);
+    if (h.empty() || inlierCount < 20 || inlierCount < (int)(from.size() * 0.2)) {
+        if (error) *error = MakeError(7, @"地上の位置合わせの信頼度が不足しています");
+        return nil;
+    }
+    // 外れ値を除いた対応すべてで当てはめ直す
+    std::vector<cv::Point2f> inFrom, inTo;
+    for (int k = 0; k < inliers.rows; k++) {
+        if (inliers.at<uchar>(k)) {
+            inFrom.push_back(from[k]);
+            inTo.push_back(to[k]);
+        }
+    }
+    cv::Mat refined = cv::findHomography(inFrom, inTo, 0);
+    if (!refined.empty()) h = refined;
+    h.convertTo(h, CV_64F);
+    const cv::Matx33d result = sInverse * cv::Matx33d((const double *)h.ptr<double>()) * s;
+
+    // 固定撮影のわずかなずれ（推定誤差）は「動きなし」に揃える
+    double maxShift = 0;
+    const float corners[4][2] = {{0, 0}, {(float)_width, 0}, {0, (float)_height}, {(float)_width, (float)_height}};
+    for (const auto &corner : corners) {
+        const cv::Point2f p = Project(result, corner[0], corner[1]);
+        maxShift = std::max(maxShift, (double)std::hypot(p.x - corner[0], p.y - corner[1]));
+    }
+    if (maxShift < 0.5) return ArrayFromMatrix(cv::Matx33d::eye());
+    return ArrayFromMatrix(result);
 }
 
 @end
