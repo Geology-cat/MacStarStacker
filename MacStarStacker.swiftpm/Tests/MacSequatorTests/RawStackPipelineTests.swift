@@ -79,6 +79,25 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(frame.pixels, pixels, "生の値がそのまま読めること")
     }
 
+    func testCameraRGBDemosaicKeepsUnbalancedChannelRatios() throws {
+        // デモザイクは撮影時ホワイトバランス（AsShotNeutral 0.5,1,0.6 → 係数 2,1,1.67）を掛けて行うが、
+        // 結果はホワイトバランスなしのカメラ色空間の値に戻ること（R・G・Bの比が生の値の比のまま）
+        let raw: [UInt16] = [3000, 2000, 1200]
+        let (url, _) = try makeBayerDNG("flat.dng") { _, _, color in raw[Int(color)] }
+        let frame = try RawDecoder.demosaicCameraRGB(from: url)
+        var sums = [Double](repeating: 0, count: 3)
+        for i in 0..<(frame.width * frame.height) {
+            for c in 0..<3 { sums[c] += Double(frame.pixels[i * 3 + c]) }
+        }
+        let expectedRed = Double(raw[0] - black) / Double(raw[1] - black)
+        let expectedBlue = Double(raw[2] - black) / Double(raw[1] - black)
+        XCTAssertEqual(sums[0] / sums[1], expectedRed, accuracy: expectedRed * 0.01)
+        XCTAssertEqual(sums[2] / sums[1], expectedBlue, accuracy: expectedBlue * 0.01)
+        // 緑は以前（ホワイトバランスなしでデモザイク）と同じ明るさ: (値 - 黒) / 白 * 65535（CameraRGBFrame.whiteLevel と同じ規則）
+        let expectedGreen = Double(raw[1] - black) / white * 65535
+        XCTAssertEqual(sums[1] / Double(frame.width * frame.height), expectedGreen, accuracy: expectedGreen * 0.01)
+    }
+
     func testLinearDNGIsNotTreatedAsBayer() throws {
         // アプリが以前書き出したリニアDNG（デモザイク済み）はベイヤー経路に乗せない
         let context = CGContext(data: nil, width: 16, height: 12, bitsPerComponent: 8, bytesPerRow: 64,

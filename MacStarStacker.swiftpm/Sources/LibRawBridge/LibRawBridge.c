@@ -203,14 +203,30 @@ int32_t LRDemosaicCameraRGB(const char *path, const uint16_t *replacementBayer, 
         }
     }
 
-    // カメラ色空間のまま（色変換なし）、ホワイトバランスなし、ガンマ・自動明るさなし、回転なし
+    // カメラ色空間のまま（色変換なし）、ガンマ・自動明るさなし、回転なし。
+    // デモザイクは撮影時ホワイトバランスを掛けた状態で行う（掛けないと、R・G・Bの差が大きい色の被写体
+    // （照明で黄色い岩肌など）で補間の方向判定を誤り、横・縦の短い線状のノイズが出る）。
+    // 最大の係数を1にそろえて飽和させず（highlight=1）、現像後に係数で割ってホワイトバランスなしの値に戻す
+    float multipliers[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    {
+        const float *cam = lr->color.cam_mul;
+        const float green = cam[1] > 0 ? cam[1] : 1.0f;
+        if (cam[0] > 0 && cam[2] > 0) {
+            multipliers[0] = cam[0] / green;
+            multipliers[1] = 1.0f;
+            multipliers[2] = cam[2] / green;
+            multipliers[3] = cam[3] > 0 ? cam[3] / green : 1.0f;
+        }
+    }
+    float largest = 0;
+    for (int c = 0; c < 4; c++) largest = multipliers[c] > largest ? multipliers[c] : largest;
     libraw_set_output_color(lr, 0);
     libraw_set_output_bps(lr, 16);
     libraw_set_gamma(lr, 0, 1.0f);
     libraw_set_gamma(lr, 1, 1.0f);
     libraw_set_no_auto_bright(lr, 1);
-    libraw_set_highlight(lr, 0);
-    for (int c = 0; c < 4; c++) libraw_set_user_mul(lr, c, 1.0f);
+    libraw_set_highlight(lr, 1);
+    for (int c = 0; c < 4; c++) libraw_set_user_mul(lr, c, multipliers[c]);
     lr->params.use_camera_wb = 0;
     lr->params.use_auto_wb = 0;
     lr->params.user_flip = 0;
@@ -238,7 +254,13 @@ int32_t LRDemosaicCameraRGB(const char *path, const uint16_t *replacementBayer, 
         libraw_close(lr);
         return -6;
     }
-    memcpy(buffer, image->data, count * sizeof(uint16_t));
+    // ホワイトバランスで掛けた分を戻す（出力は R・G・B の順。最大の係数を1にそろえてあるので、割ると元の値になる）
+    const uint16_t *source = (const uint16_t *)image->data;
+    const float restore[3] = {largest / multipliers[0], largest / multipliers[1], largest / multipliers[2]};
+    for (size_t i = 0; i < count; i++) {
+        const float value = (float)source[i] * restore[i % 3] + 0.5f;
+        buffer[i] = value >= 65535.0f ? 65535 : (uint16_t)value;
+    }
     *outRGB = buffer;
     *outWidth = image->width;
     *outHeight = image->height;
