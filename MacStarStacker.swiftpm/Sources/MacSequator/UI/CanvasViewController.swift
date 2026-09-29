@@ -24,6 +24,9 @@ public class CanvasViewController: NSViewController {
     private var cachedPreviewFileID: UUID?
     private var cachedPreviewAutoStretch: Bool?
     private var cachedPreviewImage: NSImage?
+    /// 読み込み中のプレビュー（RAWはLibRawでの現像に数秒かかるため、メインスレッドを止めずに読み込む）
+    private var loadingPreviewFileID: UUID?
+    private var loadingPreviewAutoStretch: Bool?
 
     override public func loadView() {
         let dropView = ImageDropView()
@@ -70,6 +73,8 @@ public class CanvasViewController: NSViewController {
         cachedPreviewFileID = nil
         cachedPreviewAutoStretch = nil
         cachedPreviewImage = nil
+        loadingPreviewFileID = nil
+        loadingPreviewAutoStretch = nil
         canvasView.zoomScale = 1.0
         canvasView.panOffset = .zero
         updateState()
@@ -219,11 +224,11 @@ public class CanvasViewController: NSViewController {
             fileNameLabel.textColor = .systemGreen
         } else if let preview = state.previewImage {
             displayImg = previewImage(for: preview, autoStretch: state.enableAutoStretch)
-            fileNameLabel.stringValue = preview.name
+            fileNameLabel.stringValue = displayImg == nil ? "\(preview.name)（読み込み中…）" : preview.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else if let base = state.baseImage {
             displayImg = previewImage(for: base, autoStretch: state.enableAutoStretch)
-            fileNameLabel.stringValue = base.name
+            fileNameLabel.stringValue = displayImg == nil ? "\(base.name)（読み込み中…）" : base.name
             fileNameLabel.textColor = .secondaryLabelColor
         } else {
             displayImg = nil
@@ -255,13 +260,30 @@ public class CanvasViewController: NSViewController {
         zoomLabel.stringValue = "\(Int(round(canvasView.zoomScale * 100)))%"
     }
 
+    /// 読み込み済みならその画像を返す。未読み込みならバックグラウンドで読み込みを始めて nil を返し、
+    /// 読み込み後に表示を更新する（読み込み中はマスク編集もできない）。
     private func previewImage(for file: ImageFile, autoStretch: Bool) -> NSImage? {
-        if cachedPreviewFileID != file.id || cachedPreviewAutoStretch != autoStretch {
-            cachedPreviewFileID = file.id
-            cachedPreviewAutoStretch = autoStretch
-            cachedPreviewImage = StackingStateController.shared.loadNSImage(from: file)
+        if cachedPreviewFileID == file.id, cachedPreviewAutoStretch == autoStretch {
+            return cachedPreviewImage
         }
-        return cachedPreviewImage
+        guard loadingPreviewFileID != file.id || loadingPreviewAutoStretch != autoStretch else { return nil }
+        loadingPreviewFileID = file.id
+        loadingPreviewAutoStretch = autoStretch
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let image = StackingStateController.shared.loadNSImage(from: file, autoStretch: autoStretch)
+            DispatchQueue.main.async {
+                // 読み込み中に別の画像が選ばれた場合は結果を捨てる
+                guard let self, self.loadingPreviewFileID == file.id,
+                      self.loadingPreviewAutoStretch == autoStretch else { return }
+                self.loadingPreviewFileID = nil
+                self.loadingPreviewAutoStretch = nil
+                self.cachedPreviewFileID = file.id
+                self.cachedPreviewAutoStretch = autoStretch
+                self.cachedPreviewImage = image
+                self.updateState()
+            }
+        }
+        return nil
     }
 
     // MARK: - アクション

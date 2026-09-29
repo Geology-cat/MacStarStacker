@@ -18,6 +18,13 @@ enum ImageLoader {
     /// 埋め込みの小さなプレビュー画像を返すことがあるため、OSによって合成に使う画像が変わらないようにする。
     /// macOSで開いたときと同じく、撮影時の向きに回転して返す。
     private static func loadRAW(from url: URL) -> NSImage? {
+        if let image = loadRAWWithLibRaw(from: url) { return image }
+        // LibRawはJPEG非対応でビルドしているため、非可逆圧縮DNGは読めない。DNGは機種に依存しない
+        // 標準形式でmacOSも古いOSから読めるため、macOSで読み込む。
+        return url.pathExtension.lowercased() == "dng" ? NSImage(contentsOf: url) : nil
+    }
+
+    private static func loadRAWWithLibRaw(from url: URL) -> NSImage? {
         guard let info = try? RawDecoder.readInfo(from: url),
               let rendered = try? RawDecoder.renderSRGB(
                 from: url, exposure: RawStackPipeline.baselineExposure(for: url)),

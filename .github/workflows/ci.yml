@@ -2,9 +2,9 @@ name: Swiftテスト
 
 on:
   push:
-    branches: [main]
+    branches: [main, macos10.13]
   pull_request:
-    branches: [main]
+    branches: [main, macos10.13]
   workflow_dispatch:
 
 permissions:

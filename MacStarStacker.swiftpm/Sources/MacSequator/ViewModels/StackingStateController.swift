@@ -303,12 +303,14 @@ class StackingStateController {
 
     // MARK: - 画像読み込み・表示用処理
 
-    func loadNSImage(from file: ImageFile?) -> NSImage? {
+    /// バックグラウンドから呼べるよう、自動ストレッチの有無は引数で受け取る（省略時は現在の設定）。
+    func loadNSImage(from file: ImageFile?, autoStretch: Bool? = nil) -> NSImage? {
         guard let file = file else { return nil }
         guard let original = ImageLoader.load(from: file.url) else { return nil }
-        guard enableAutoStretch else { return original }
+        guard autoStretch ?? enableAutoStretch else { return original }
 
-        let ci = CIImage(contentsOf: file.url)
+        // RAWはmacOSのRAWエンジンで読み直さず、LibRawで現像した画像をそのまま使う
+        let ci = (RawDecoder.isRawFile(file.url) ? nil : CIImage(contentsOf: file.url))
             ?? original.cgImage(forProposedRect: nil, context: nil, hints: nil).map(CIImage.init(cgImage:))
         guard let ci else { return original }
         guard let gammaFilter = CIFilter(name: "CIGammaAdjust") else { return original }
