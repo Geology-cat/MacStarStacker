@@ -138,9 +138,36 @@ static cv::Mat EstimateHomography(const cv::Mat &im_target_gray, const cv::Mat &
     return nil;
   }
 
-  // --- Warp original color image using the computed homography ---
-  cv::Mat im_target_color =
-      cv::imread(targetURL.path.UTF8String, cv::IMREAD_UNCHANGED);
+  return [self warpColorImageAtURL:targetURL
+                          homography:homography
+                          outputSize:cv::Size(im_base_gray.cols, im_base_gray.rows)
+                               error:error];
+}
+
++ (nullable NSImage *)warpImageAtURL:(NSURL *)url
+                          homography:(NSArray<NSNumber *> *)homography
+                               error:(NSError **)error {
+  if (homography.count != 9) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"ImageAlignerDomain"
+                                   code:9
+                               userInfo:@{NSLocalizedDescriptionKey : @"変換行列が不正です"}];
+    }
+    return nil;
+  }
+  cv::Mat matrix(3, 3, CV_64F);
+  for (int index = 0; index < 9; index++) {
+    matrix.at<double>(index / 3, index % 3) = homography[index].doubleValue;
+  }
+  return [self warpColorImageAtURL:url homography:matrix outputSize:cv::Size() error:error];
+}
+
+/// 画像ファイルをカラーで読み込み、ホモグラフィで変形する。outputSize が空なら元の寸法。
++ (nullable NSImage *)warpColorImageAtURL:(NSURL *)url
+                               homography:(const cv::Mat &)homography
+                               outputSize:(cv::Size)outputSize
+                                    error:(NSError **)error {
+  cv::Mat im_target_color = cv::imread(url.path.UTF8String, cv::IMREAD_UNCHANGED);
   if (im_target_color.empty()) {
     if (error) {
       *error = [NSError
@@ -170,9 +197,11 @@ static cv::Mat EstimateHomography(const cv::Mat &im_target_gray, const cv::Mat &
     }
     return nil;
   }
+  if (outputSize.width <= 0 || outputSize.height <= 0) {
+    outputSize = im_target_color.size();
+  }
   cv::Mat im_aligned;
-  cv::warpPerspective(im_target_color, im_aligned, homography,
-                      cv::Size(im_base_gray.cols, im_base_gray.rows),
+  cv::warpPerspective(im_target_color, im_aligned, homography, outputSize,
                       cv::INTER_LANCZOS4 // High-quality Lanczos 4x4 resampling
   );
 
@@ -183,34 +212,6 @@ static cv::Mat EstimateHomography(const cv::Mat &im_target_gray, const cv::Mat &
   return [self NSImageFromMat:im_rgb];
 }
 
-
-+ (NSArray<NSNumber *> *)homographyFromGrayPixels:(NSData *)targetGray
-                                     toBaseGray:(NSData *)baseGray
-                                          width:(NSInteger)width
-                                         height:(NSInteger)height
-                                          error:(NSError **)error {
-  if (width <= 0 || height <= 0 || targetGray.length < (NSUInteger)(width * height) ||
-      baseGray.length < (NSUInteger)(width * height)) {
-    if (error) {
-      *error = [NSError errorWithDomain:@"ImageAlignerDomain"
-                                   code:8
-                               userInfo:@{NSLocalizedDescriptionKey : @"位置合わせ用の画素データが不正です"}];
-    }
-    return nil;
-  }
-  cv::Mat target((int)height, (int)width, CV_8UC1, (void *)targetGray.bytes);
-  cv::Mat base((int)height, (int)width, CV_8UC1, (void *)baseGray.bytes);
-  cv::Mat homography = EstimateHomography(target, base, error);
-  if (homography.empty()) return nil;
-  homography.convertTo(homography, CV_64F);
-  NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:9];
-  for (int row = 0; row < 3; row++) {
-    for (int col = 0; col < 3; col++) {
-      [values addObject:@(homography.at<double>(row, col))];
-    }
-  }
-  return values;
-}
 
 + (BOOL)warpRGB16Pixels:(NSMutableData *)pixels
                   width:(NSInteger)width

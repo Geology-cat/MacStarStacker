@@ -222,16 +222,32 @@ enum RawStackPipeline {
         let base = try demosaic(baseIndex)
         let width = base.width, height = base.height
         let sampleCount = width * height * 3
-        let grayScale = GrayConverter(base: base)
-        let baseGray = grayScale.gray(base)
+
+        // 空・地上マスクがあれば、空の中の星だけで位置合わせする
+        let groundWeights = try input.skyGroundMask.map {
+            try groundAlpha(mask: $0, info: info, featherRadius: input.maskFeatherRadius)
+        }
+        let skyMask = groundWeights.flatMap { weights -> Data? in
+            guard weights.count == width * height else { return nil }
+            return Data(weights.map { $0 < 0.5 ? 255 : 0 })
+        }
+        let starAligner: StarAligner
+        do {
+            starAligner = try StarAligner(baseGray: starGray(base), width: width, height: height, skyMask: skyMask)
+        } catch {
+            throw PipelineError(message: "星の位置合わせを準備できませんでした（\(error.localizedDescription)）")
+        }
 
         let skyStacker = StreamingStacker(mode: input.mode, count: sampleCount,
                                           grouping: .rgbPixels(weights: brightWeights(info, colors: [0, 1, 2])))
         let groundMode: Mode = input.mode == .median ? .median : .average
         let groundStacker = input.skyGroundMask != nil ? StreamingStacker(mode: groundMode, count: sampleCount) : nil
 
-        for index in 0..<total {
-            progress(0.08 + Double(index) / Double(total) * 0.74, "RAWを現像・位置合わせ中 (\(index + 1)/\(total))...")
+        // 基準フレームから外側へ順に処理し、隣のフレームの変換を初期値にする（合成結果は順番に依らない）
+        let order = [baseIndex] + Array((baseIndex + 1)..<total) + Array((0..<baseIndex).reversed())
+        var homographies: [Int: [NSNumber]] = [:]
+        for (step, index) in order.enumerated() {
+            progress(0.08 + Double(step) / Double(total) * 0.74, "RAWを現像・位置合わせ中 (\(step + 1)/\(total))...")
             let frame = index == baseIndex ? base : try demosaic(index)
             guard frame.width == width, frame.height == height else {
                 throw PipelineError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
@@ -243,13 +259,14 @@ enum RawStackPipeline {
             }
             let homography: [NSNumber]
             do {
-                homography = try ImageAligner.homography(
-                    fromGrayPixels: grayScale.gray(frame), toBaseGray: baseGray,
-                    width: width, height: height
+                homography = try starAligner.homography(
+                    fromGray: starGray(frame),
+                    initialGuess: homographies[index > baseIndex ? index - 1 : index + 1]
                 )
             } catch {
                 throw PipelineError(message: "星の位置合わせに失敗しました: \(input.lights[index].lastPathComponent)（\(error.localizedDescription)）")
             }
+            homographies[index] = homography
             let warped = NSMutableData(length: sampleCount * MemoryLayout<UInt16>.size)!
             frame.pixels.withUnsafeBytes { source in
                 warped.replaceBytes(in: NSRange(location: 0, length: source.count), withBytes: source.baseAddress!)
@@ -264,8 +281,7 @@ enum RawStackPipeline {
 
         progress(0.84, "スタッキング中...")
         var pixels = skyStacker.result()
-        if let mask = input.skyGroundMask, let ground = groundStacker?.result() {
-            let alpha = try groundAlpha(mask: mask, info: info, featherRadius: input.maskFeatherRadius)
+        if let alpha = groundWeights, let ground = groundStacker?.result() {
             blend(sky: &pixels, ground: ground, alpha: alpha, samplesPerPixel: 3)
         }
 
@@ -816,44 +832,17 @@ final class StreamingStacker {
     }
 }
 
-/// 位置合わせの特徴点検出用に、カメラRGBを8bitの輝度画像へ変換する（全フレームで同じ明るさの基準を使う）。
-struct GrayConverter {
-    private let scale: Float
-
-    init(base: CameraRGBFrame) {
-        // 基準画像の明るい側（99.9%点）を白にし、暗い星空でも特徴点が拾えるよう持ち上げる
-        let pixelCount = base.width * base.height
-        let step = max(1, pixelCount / 200_000)
-        var samples: [Float] = []
-        samples.reserveCapacity(pixelCount / step + 1)
-        var index = 0
-        while index < pixelCount {
-            let i = index * 3
-            samples.append((Float(base.pixels[i]) + Float(base.pixels[i + 1]) + Float(base.pixels[i + 2])) / 3)
-            index += step
-        }
-        samples.sort()
-        let high = samples.isEmpty ? 65535 : samples[min(samples.count - 1, Int(Float(samples.count) * 0.999))]
-        scale = 1 / max(high, 64)
-    }
-
-    func gray(_ frame: CameraRGBFrame) -> Data {
-        let pixelCount = frame.width * frame.height
-        var data = Data(count: pixelCount)
-        let scale = self.scale
-        data.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
-            let out = output.bindMemory(to: UInt8.self)
-            frame.pixels.withUnsafeBufferPointer { input in
-                DispatchQueue.concurrentPerform(iterations: frame.height) { y in
-                    for x in 0..<frame.width {
-                        let p = y * frame.width + x
-                        let luminance = (Float(input[p * 3]) + Float(input[p * 3 + 1]) + Float(input[p * 3 + 2])) / 3 * scale
-                        // ガンマ 1/2.2 で暗部を持ち上げる
-                        out[p] = UInt8(max(0, min(255, (pow(min(1, luminance), 1 / 2.2) * 255).rounded())))
-                    }
-                }
+/// 星の検出・位置合わせ用の線形輝度（R・G・Bの平均、float32）
+private func starGray(_ frame: CameraRGBFrame) -> Data {
+    let count = frame.width * frame.height
+    var data = Data(count: count * MemoryLayout<Float>.size)
+    data.withUnsafeMutableBytes { raw in
+        let gray = raw.bindMemory(to: Float.self)
+        frame.pixels.withUnsafeBufferPointer { rgb in
+            for i in 0..<count {
+                gray[i] = (Float(rgb[i * 3]) + Float(rgb[i * 3 + 1]) + Float(rgb[i * 3 + 2])) / 3
             }
         }
-        return data
     }
+    return data
 }
