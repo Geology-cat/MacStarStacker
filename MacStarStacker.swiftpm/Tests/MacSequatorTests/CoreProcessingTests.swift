@@ -322,11 +322,14 @@ final class CoreProcessingTests: XCTestCase {
         let state = StackingStateController.shared
         let previousEnabled = state.enableSkyGroundMask
         let previousRadius = state.maskFeatherRadius
+        let previousMode = state.stackMode
         defer {
             state.enableSkyGroundMask = previousEnabled
             state.maskFeatherRadius = previousRadius
+            state.stackMode = previousMode
         }
 
+        state.stackMode = "Average"
         state.enableSkyGroundMask = false
         state.maskFeatherRadius = 27
         let controller = SettingsViewController()
@@ -343,7 +346,11 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertEqual(slider.doubleValue, 27, accuracy: 0.001)
         XCTAssertEqual(label.stringValue, "27 px")
 
+        // 新星景モード（平均・中央値）の境界は自動で滑らかになるため、境界ぼかしは比較明でだけ使う
         state.enableSkyGroundMask = true
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertFalse(slider.isEnabled)
+        state.stackMode = "Compare Bright"
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         XCTAssertTrue(slider.isEnabled)
         slider.doubleValue = 41
