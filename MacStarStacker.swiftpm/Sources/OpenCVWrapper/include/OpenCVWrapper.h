@@ -1,4 +1,6 @@
 #import "ImageAligner.h"
 #import "StarAligner.h"
+#import "GroundAligner.h"
+#import "Nightscape.h"
 #import "TimelapseStabilizer.h"
 #import "TrailCleaner.h"
