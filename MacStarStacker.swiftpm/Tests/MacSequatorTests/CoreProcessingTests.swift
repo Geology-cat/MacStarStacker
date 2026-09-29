@@ -240,6 +240,41 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertNil(canvas.viewToImagePoint(CGPoint(x: 450, y: 10)))
     }
 
+    func testCanvasPansByDraggingNotScrollingAndStaysInsideItsBounds() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let canvas = MaskCanvasView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        window.contentView = canvas
+        canvas.currentImage = makeImage(width: 100, height: 100, pixel: (30, 30, 30, 255))
+        XCTAssertTrue(canvas.clipsToBounds, "拡大した画像がキャンバスの外（ツールバー）に描かれないこと")
+
+        // スクロールでは画像を動かさない
+        let scroll = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                                           wheel1: 10, wheel2: 10, wheel3: 0))
+        canvas.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: scroll)))
+        XCTAssertEqual(canvas.panOffset, .zero)
+        XCTAssertEqual(canvas.zoomScale, 1)
+
+        // つかんでドラッグすると、その分だけ動く（キャンバスは上原点、ウィンドウは下原点）
+        func mouse(_ type: NSEvent.EventType, _ point: NSPoint) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                             clickCount: 1, pressure: 1))
+        }
+        canvas.mouseDown(with: try mouse(.leftMouseDown, NSPoint(x: 100, y: 100)))
+        canvas.mouseDragged(with: try mouse(.leftMouseDragged, NSPoint(x: 130, y: 80)))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, NSPoint(x: 130, y: 80)))
+        XCTAssertEqual(canvas.panOffset.x, 30, accuracy: 0.001)
+        XCTAssertEqual(canvas.panOffset.y, 20, accuracy: 0.001)
+
+        // 倍率は 0.25〜10 倍に収め、変わるたびに通知する
+        var reported: [CGFloat] = []
+        canvas.onZoomChanged = { reported.append($0) }
+        canvas.zoomScale = 50
+        canvas.zoomScale = 0.01
+        XCTAssertEqual(reported, [10, 0.25])
+    }
+
     func testMaskFeatherControlTracksEditingStateAndUpdatesRadius() throws {
         let state = StackingStateController.shared
         let previousEnabled = state.enableSkyGroundMask

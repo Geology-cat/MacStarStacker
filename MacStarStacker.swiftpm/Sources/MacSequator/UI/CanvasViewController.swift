@@ -148,6 +148,10 @@ public class CanvasViewController: NSViewController {
 
         // 2. キャンバス
         canvasView.translatesAutoresizingMaskIntoConstraints = false
+        // ボタン・Cmd+スクロール・ピンチのどれでズームしても倍率表示をそろえる
+        canvasView.onZoomChanged = { [weak self] scale in
+            self?.zoomLabel.stringValue = "\(Int(round(scale * 100)))%"
+        }
         view.addSubview(canvasView)
 
         // 3. 下部プログレスバー
@@ -328,18 +332,15 @@ public class CanvasViewController: NSViewController {
     }
 
     @objc private func onZoomPlusClicked() {
-        canvasView.zoomScale = min(10.0, canvasView.zoomScale + 0.25)
-        zoomLabel.stringValue = "\(Int(round(canvasView.zoomScale * 100)))%"
+        canvasView.zoomScale += 0.25
     }
 
     @objc private func onZoomMinusClicked() {
-        canvasView.zoomScale = max(0.25, canvasView.zoomScale - 0.25)
-        zoomLabel.stringValue = "\(Int(round(canvasView.zoomScale * 100)))%"
+        canvasView.zoomScale -= 0.25
     }
 
     @objc private func onZoomResetClicked() {
         canvasView.zoomScale = 1.0
         canvasView.panOffset = .zero
-        zoomLabel.stringValue = "100%"
     }
 }

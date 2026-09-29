@@ -13,11 +13,19 @@ public class MaskCanvasView: NSView {
         }
     }
 
+    /// 表示倍率（0.25〜10倍）。変わるたびに onZoomChanged で知らせる（ツールバーの倍率表示用）
     public var zoomScale: CGFloat = 1.0 {
         didSet {
+            // didSet 内での代入は didSet を再度呼ばないため、範囲に収めたうえでそのまま通知する
+            let clamped = min(Self.maximumZoom, max(Self.minimumZoom, zoomScale))
+            if clamped != zoomScale { zoomScale = clamped }
             needsDisplay = true
+            onZoomChanged?(zoomScale)
         }
     }
+    public static let minimumZoom: CGFloat = 0.25
+    public static let maximumZoom: CGFloat = 10.0
+    public var onZoomChanged: ((CGFloat) -> Void)?
 
     public var panOffset: CGPoint = .zero {
         didSet {
@@ -39,8 +47,8 @@ public class MaskCanvasView: NSView {
                 maskCtx = nil
                 overlayCGImage = nil
                 synchronizedMaskIdentifier = nil
-                NSCursor.arrow.set()
             }
+            updateCursorIfMouseInside()
             needsDisplay = true
         }
     }
@@ -52,6 +60,8 @@ public class MaskCanvasView: NSView {
     private var hoverViewPt: CGPoint? = nil
     private var isDragging: Bool = false
     private var isSpacePressed: Bool = false
+    /// 画像をつかんで動かしている最中か
+    private var isPanning: Bool = false
     private var lastDragPoint: CGPoint = .zero
     private var synchronizedMaskIdentifier: ObjectIdentifier? = nil
 
@@ -64,11 +74,17 @@ public class MaskCanvasView: NSView {
 
     override public init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        setupTrackingArea()
+        commonInit()
     }
 
     required public init?(coder: NSCoder) {
         super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        // macOS 14 以降は既定でビューの外にも描画されるため、拡大した画像がツールバーに重ならないよう切り取る
+        clipsToBounds = true
         setupTrackingArea()
     }
 
@@ -304,7 +320,7 @@ public class MaskCanvasView: NSView {
     override public func keyUp(with event: NSEvent) {
         if event.keyCode == 49 { // Space
             isSpacePressed = false
-            NSCursor.arrow.set()
+            updateCursor()
             needsDisplay = true
         } else {
             super.keyUp(with: event)
@@ -316,7 +332,8 @@ public class MaskCanvasView: NSView {
         let viewPt = convert(event.locationInWindow, from: nil)
         lastDragPoint = viewPt
 
-        if isSpacePressed || event.modifierFlags.contains(.option) {
+        if isPanModifierActive(event) || (!isMaskEditingEnabled && currentImage != nil) {
+            isPanning = true
             NSCursor.closedHand.set()
             return
         }
@@ -334,7 +351,7 @@ public class MaskCanvasView: NSView {
     override public func mouseDragged(with event: NSEvent) {
         let viewPt = convert(event.locationInWindow, from: nil)
 
-        if isSpacePressed || event.modifierFlags.contains(.option) {
+        if isPanning {
             let dx = viewPt.x - lastDragPoint.x
             let dy = viewPt.y - lastDragPoint.y
             panOffset = CGPoint(x: panOffset.x + dx, y: panOffset.y + dy)
@@ -358,17 +375,15 @@ public class MaskCanvasView: NSView {
     override public func mouseUp(with event: NSEvent) {
         let completedMaskStroke = isDragging && isMaskEditingEnabled
         isDragging = false
+        isPanning = false
         lastImagePt = nil
-        if isSpacePressed {
-            NSCursor.openHand.set()
-        } else {
-            NSCursor.arrow.set()
-        }
+        updateCursor()
         if completedMaskStroke { exportMaskBitmap() }
         needsDisplay = true
     }
 
     override public func mouseMoved(with event: NSEvent) {
+        updateCursor()
         guard isMaskEditingEnabled else { return }
         hoverViewPt = convert(event.locationInWindow, from: nil)
         needsDisplay = true
@@ -381,21 +396,42 @@ public class MaskCanvasView: NSView {
     }
 
     override public func cursorUpdate(with event: NSEvent) {
-        if isSpacePressed { NSCursor.openHand.set() }
-        else if isMaskEditingEnabled { NSCursor.crosshair.set() }
-        else { NSCursor.arrow.set() }
+        updateCursor()
+    }
+
+    /// 画像はカーソルでつかんで動かす（マスク編集中は Space または Option を押しながらドラッグ）
+    private func isPanModifierActive(_ event: NSEvent) -> Bool {
+        isSpacePressed || event.modifierFlags.contains(.option)
+    }
+
+    private func updateCursor() {
+        if isPanning {
+            NSCursor.closedHand.set()
+        } else if isSpacePressed || (!isMaskEditingEnabled && currentImage != nil) {
+            NSCursor.openHand.set()
+        } else if isMaskEditingEnabled {
+            NSCursor.crosshair.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    /// マウスがキャンバス上にあるときだけカーソルを切り替える（外にあるときに変えると他の場所の表示が変わる）
+    private func updateCursorIfMouseInside() {
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        if bounds.contains(point) { updateCursor() }
     }
 
     override public func scrollWheel(with event: NSEvent) {
-        if event.modifierFlags.contains(.command) {
-            // Cmd + スクロールでズーム
-            let zoomDelta = event.deltaY * 0.05
-            let newScale = max(0.25, min(10.0, zoomScale + zoomDelta))
-            zoomScale = newScale
-        } else {
-            // パン操作
-            panOffset = CGPoint(x: panOffset.x + event.deltaX * 2.0, y: panOffset.y + event.deltaY * 2.0)
-        }
+        // スクロールでは画像を動かさない（つかんで動かす）。Cmd + スクロールでズームする
+        guard event.modifierFlags.contains(.command) else { return }
+        zoomScale += event.deltaY * 0.05
+    }
+
+    /// トラックパッドのピンチでズームする
+    override public func magnify(with event: NSEvent) {
+        zoomScale *= 1 + event.magnification
     }
 
     // MARK: - ペイントロジック
