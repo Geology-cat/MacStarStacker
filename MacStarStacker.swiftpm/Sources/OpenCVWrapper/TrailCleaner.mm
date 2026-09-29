@@ -61,7 +61,9 @@ static cv::Mat MatFromNSImage(NSImage *image) {
     int width = (int)CGImageGetWidth(cgImage);
     int height = (int)CGImageGetHeight(cgImage);
 
-    cv::Mat mat(height, width, CV_8UC4);
+    // 透明な部分は下地と合成されるため、未初期化のメモリではなく黒の下地に描く
+    // （未初期化だと実行ごとに結果が変わる）
+    cv::Mat mat = cv::Mat::zeros(height, width, CV_8UC4);
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     CGContextRef context = CGBitmapContextCreate(
         mat.data, width, height, 8, mat.step[0],
@@ -102,7 +104,9 @@ static cv::Mat LoadColorMatFromURL(NSURL *url) {
             int width = (int)CGImageGetWidth(cgImage);
             int height = (int)CGImageGetHeight(cgImage);
             if (width > 0 && height > 0) {
-                cv::Mat rgbaMat(height, width, CV_8UC4);
+                // 透明な部分は下地と合成されるため、未初期化のメモリではなく黒の下地に描く
+                // （未初期化だと実行ごとに検出結果が変わる）
+                cv::Mat rgbaMat = cv::Mat::zeros(height, width, CV_8UC4);
                 CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
                 CGContextRef context = CGBitmapContextCreate(
                     rgbaMat.data, width, height, 8, rgbaMat.step[0],
