@@ -248,6 +248,84 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(with.pixels[5 * width + 10], 1000)
     }
 
+    func testCompareBrightWithAlignmentStacksAlignedStarsAndRemovesTrails() throws {
+        let width = 640, height = 480
+        var stars: [(Int, Int, Int)] = []
+        var seed: UInt64 = 21
+        func random(_ upper: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(upper))
+        }
+        for _ in 0..<400 { stars.append((20 + random(width - 40), 20 + random(height - 60), 3000 + random(9000))) }
+        let trailRow = height - 20  // 星の無い下端付近を横切る光跡
+        func field(shiftX: Int, shiftY: Int, trail: Bool = false) -> (Int, Int, UInt8) -> UInt16 {
+            var canvas = [UInt16](repeating: 700, count: width * height)
+            for (sx, sy, brightness) in stars {
+                for dy in -3...3 {
+                    for dx in -3...3 {
+                        let d2 = dx * dx + dy * dy
+                        let x = sx + shiftX + dx, y = sy + shiftY + dy
+                        guard d2 <= 9, x >= 0, y >= 0, x < width, y < height else { continue }
+                        canvas[y * width + x] = max(canvas[y * width + x], UInt16(700 + brightness / (1 + d2)))
+                    }
+                }
+            }
+            if trail {
+                for y in (trailRow - 1)...(trailRow + 1) {
+                    for x in 0..<width { canvas[y * width + x] = 14000 }
+                }
+            }
+            return { x, y, _ in canvas[y * width + x] }
+        }
+        let (f0, _) = try makeBayerDNG("cb0.dng", width: width, height: height, value: field(shiftX: 0, shiftY: 0))
+        let (f1, _) = try makeBayerDNG("cb1.dng", width: width, height: height, value: field(shiftX: 6, shiftY: 4, trail: true))
+        let (f2, _) = try makeBayerDNG("cb2.dng", width: width, height: height, value: field(shiftX: 12, shiftY: 8))
+
+        // フレーム1の光跡のマスク（表示の向き＝センサーの向き）
+        var maskPixels = [UInt8](repeating: 0, count: width * height * 4)
+        for y in (trailRow - 6)...(trailRow + 6) {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                maskPixels[i] = 255; maskPixels[i + 1] = 255; maskPixels[i + 2] = 255
+            }
+        }
+        for i in stride(from: 3, to: maskPixels.count, by: 4) { maskPixels[i] = 255 }
+        let provider = CGDataProvider(data: Data(maskPixels) as CFData)!
+        let maskCG = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                             provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let mask = NSImage(cgImage: maskCG, size: NSSize(width: width, height: height))
+
+        let result = try XCTUnwrap(RawStackPipeline.stack(
+            input(lights: [f0, f1, f2], mode: .compareBright, align: true, trails: [1: [mask]])) { _, _ in })
+        XCTAssertEqual(result.kind, .cameraRGB, "位置合わせありはカメラ色空間RGBで合成する")
+
+        // 位置合わせしなかった場合に星が写る位置（ずれた先）が、星の無い背景のままであること
+        let background = try RawDecoder.demosaicCameraRGB(from: f0)
+        func green(_ pixels: [UInt16], _ x: Int, _ y: Int) -> Double { Double(pixels[(y * width + x) * 3 + 1]) }
+        /// (x, y) に（基準画像の）星が重なるか
+        func hasStar(near x: Int, _ y: Int) -> Bool {
+            stars.contains { abs($0.0 - x) < 5 && abs($0.1 - y) < 5 }  // 星の半径は3px
+        }
+        // ずれた先（6,4 と 12,8）に別の星が無い星だけを使う
+        let isolated = stars.filter { !hasStar(near: $0.0 + 12, $0.1 + 8) && !hasStar(near: $0.0 + 6, $0.1 + 4) }.prefix(60)
+        XCTAssertGreaterThan(isolated.count, 20)
+        var atStars = 0.0, atShifted = 0.0
+        for (sx, sy, _) in isolated {
+            atStars += green(result.pixels, sx, sy)
+            atShifted += green(result.pixels, sx + 12, sy + 8)
+        }
+        let backgroundLevel = green(background.pixels, 5, 5)
+        XCTAssertLessThan((atShifted / Double(isolated.count)) - backgroundLevel,
+                          0.1 * ((atStars / Double(isolated.count)) - backgroundLevel),
+                          "星が合っていれば、ずれた位置に星の軌跡が残らない")
+
+        // 光跡は前後のフレームの値に置き換わり、比較明合成の結果に残らない。
+        // フレーム1は位置合わせで (-6, -4) 動くため、結果の画像では光跡は4行上の位置になる
+        let trailX = (0..<width).first { x in !stars.contains { abs($0.0 - x) < 20 } } ?? 0
+        XCTAssertLessThan(green(result.pixels, trailX, trailRow - 4), backgroundLevel * 1.5, "光跡が除去されていること")
+    }
+
     func testSkyGroundMaskBlendsOnBayerData() throws {
         let width = 64, height = 48
         let (a, _) = try makeBayerDNG("a.dng") { _, _, _ in 1000 }

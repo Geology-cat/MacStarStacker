@@ -275,6 +275,49 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertEqual(reported, [10, 0.25])
     }
 
+    func testCompareBrightKeepsItsOwnAlignmentSetting() {
+        let state = StackingStateController()
+        XCTAssertTrue(state.isAlignmentEnabledForCurrentMode, "平均合成の既定は位置合わせON")
+        state.stackMode = "Compare Bright"
+        XCTAssertFalse(state.isAlignmentEnabledForCurrentMode, "比較明合成の既定はOFF（星の軌跡を残す）")
+
+        state.isAlignmentEnabledForCurrentMode = true
+        XCTAssertTrue(state.enableCompareBrightAlignment)
+        state.stackMode = "Average"
+        state.isAlignmentEnabledForCurrentMode = false
+        XCTAssertFalse(state.enableAlignment)
+        state.stackMode = "Compare Bright"
+        XCTAssertTrue(state.isAlignmentEnabledForCurrentMode, "方式ごとの設定が互いに上書きされない")
+    }
+
+    func testFileListSelectsTheFileShownInPreview() throws {
+        let state = StackingStateController.shared
+        let saved = (state.images, state.previewImage, state.showResult, state.stackedResult)
+        defer {
+            state.images = saved.0
+            state.previewImage = saved.1
+            state.showResult = saved.2
+            state.stackedResult = saved.3
+        }
+        let files = (0..<3).map { ImageFile(url: URL(fileURLWithPath: "/tmp/preview_\($0).tif")) }
+        state.images[.light] = files
+        state.previewImage = files[2]
+        state.showResult = false
+
+        let controller = FileListViewController()
+        _ = controller.view
+        controller.updateUI()
+        let table = try XCTUnwrap(allSubviews(of: controller.view).compactMap { $0 as? NSTableView }.first)
+        XCTAssertEqual(table.selectedRow, 2, "プレビューに表示中のファイルの行を選択する（再読み込みで消えない）")
+        XCTAssertEqual(state.previewImage?.id, files[2].id, "選択し直してもプレビューは変わらない")
+
+        // スタック結果を表示している間は、どのファイルも選択しない
+        state.stackedResult = makeImage(width: 4, height: 4, pixel: (0, 0, 0, 255))
+        state.showResult = true
+        controller.updateUI()
+        XCTAssertEqual(table.selectedRow, -1)
+    }
+
     func testMaskFeatherControlTracksEditingStateAndUpdatesRadius() throws {
         let state = StackingStateController.shared
         let previousEnabled = state.enableSkyGroundMask
