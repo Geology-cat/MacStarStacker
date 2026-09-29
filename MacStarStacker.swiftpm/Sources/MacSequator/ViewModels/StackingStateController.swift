@@ -48,7 +48,11 @@ class StackingStateController {
     }
     var stackMode: String = "Average" { didSet { if oldValue != stackMode { notifyStateChanged() } } } // "Average", "Median", "Compare Bright"
     /// ON のときだけ空・地上マスクの編集と分離合成を有効にする。
+    /// 平均・中央値では新星景モード（空と地上を自動で判定し、塗った所は手がかりにする）、
+    /// 比較明では塗ったマスクで空（比較明）と地上（平均）を分ける。
     var enableSkyGroundMask: Bool = false { didSet { if oldValue != enableSkyGroundMask { notifyStateChanged() } } }
+    /// 新星景モード（空は星に、地上は地上に合わせて合成）が有効か
+    var isNightscapeActive: Bool { enableSkyGroundMask && stackMode != "Compare Bright" }
     var maskBitmap: NSImage? = nil { didSet { notifyStateChanged() } }
     var brushSize: CGFloat = 20.0 { didSet { if oldValue != brushSize { notifyStateChanged() } } }
     /// 空と地上を合成するときの境界ぼかし半径（最終画像上のピクセル単位）。
@@ -414,8 +418,8 @@ class StackingStateController {
             notifyStateChanged()
             return
         }
-        if enableSkyGroundMask && maskBitmap == nil {
-            stackingStatus = "⚠️ 空・地上マスクをONにした場合は、地上領域をブラシで指定してください"
+        if enableSkyGroundMask && !isNightscapeActive && maskBitmap == nil {
+            stackingStatus = "⚠️ 比較明合成で空と地上を分ける場合は、地上領域をブラシで指定してください"
             notifyStateChanged()
             return
         }
@@ -446,7 +450,8 @@ class StackingStateController {
         let biasFiles  = images[.bias]  ?? []
         let mode       = stackMode
         let useSkyGroundMask = enableSkyGroundMask
-        // 比較明合成では星の軌跡を保つため、アライメントを強制的に無効化する。
+        // 新星景モード（平均・中央値）: 空は星に、地上は地上に合わせる（塗ったマスクは判定の手がかり）
+        let nightscape = isNightscapeActive
         let doAlign    = isAlignmentEnabledForCurrentMode
         let mask       = useSkyGroundMask ? maskBitmap : nil
         let maskFeather = maskFeatherRadius
@@ -472,7 +477,8 @@ class StackingStateController {
                 trailMasks: trailRemovalActive
                     ? Dictionary(grouping: trailItems.filter(\.isMarkedForRemoval), by: \.frameIndex)
                         .mapValues { $0.compactMap(\.maskImage) }
-                    : [:]
+                    : [:],
+                nightscape: nightscape
             )
             var rawFallbackReason: String?
             do {
@@ -484,13 +490,23 @@ class StackingStateController {
                     }
                 }) {
                     let resolvedBaseMetadata = knownBaseMetadata ?? RawMetadataExtractor.extract(from: base.url)
+                    // 自動判定の結果を、表示の向きのマスクにしてブラシで直せるようにする
+                    let overlay = rawResult.skyAlpha.flatMap { alpha in
+                        StackingStateController.displayOrientedOverlay(
+                            NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: rawResult.width, height: rawResult.height),
+                            orientation: Int(rawResult.info.orientation))
+                    }
                     DispatchQueue.main.async {
                         self.stackedResult = rawResult.displayImage
                         self.stackedRawResult = rawResult
                         self.stackedResultMetadata = resolvedBaseMetadata
                         self.previewImage = nil
                         self.stackingProgress = 1.0
-                        self.stackingStatus = "✅ スタッキング完了！（\(rawResult.modeDescription)で合成）"
+                        if let overlay { self.maskBitmap = overlay }
+                        let method = rawResult.skyAlpha != nil
+                            ? "新星景モード・\(rawResult.modeDescription)" : rawResult.modeDescription
+                        self.stackingStatus = "✅ スタッキング完了！（\(method)で合成）"
+                            + (rawResult.note.map { "\n\($0)" } ?? "")
                         self.isStacking = false
                         self.showResult = true
                         self.notifyStateChanged()
@@ -568,14 +584,65 @@ class StackingStateController {
                 calibratedFrames.append((lf, calibrated))
 
                 DispatchQueue.main.async {
-                    self.stackingProgress = Double(i + 1) / Double(total) * (doAlign ? 0.35 : 0.75)
+                    self.stackingProgress = Double(i + 1) / Double(total) * (doAlign || nightscape ? 0.35 : 0.75)
                     self.stackingStatus = "画像を読み込み・補正中 (\(i + 1)/\(total))..."
                     self.notifyStateChanged()
                 }
             }
 
+            // 新星景モード: 空は星に、地上は地上に合わせて合成する。分ける必要が無い・できないときは通常の合成にする
+            var alignFrames = doAlign
+            var nightscapeImage: NSImage?
+            var nightscapeOverlay: NSImage?
+            var notes: [String] = []
+            if nightscape {
+                let baseIndex = calibratedFrames.firstIndex(where: { $0.file.id == base.id }) ?? 0
+                do {
+                    guard let first = NightscapeCompositor.rgb16(from: calibratedFrames[baseIndex].image) else {
+                        throw NightscapeCompositor.CompositorError(message: "基準画像を読み込めませんでした")
+                    }
+                    let hints = mask.flatMap { NightscapeCompositor.hints(from: $0, width: first.width, height: first.height) }
+                    let outcome = try NightscapeCompositor.compose(
+                        frameCount: total, baseIndex: baseIndex, width: first.width, height: first.height, hints: hints,
+                        loadFrame: { index in
+                            if index == baseIndex { return first.pixels }
+                            guard let frame = NightscapeCompositor.rgb16(from: calibratedFrames[index].image),
+                                  frame.width == first.width, frame.height == first.height else {
+                                throw NightscapeCompositor.CompositorError(
+                                    message: "画像サイズが一致しません: \(calibratedFrames[index].file.name)")
+                            }
+                            return frame.pixels
+                        },
+                        progress: { fraction, status in
+                            DispatchQueue.main.async {
+                                self.stackingProgress = 0.35 + fraction * 0.6
+                                self.stackingStatus = status
+                                self.notifyStateChanged()
+                            }
+                        }
+                    )
+                    switch outcome {
+                    case .composited(let composited):
+                        nightscapeImage = NightscapeCompositor.image(from: NightscapeCompositor.RGB16Image(
+                            pixels: composited.pixels, width: first.width, height: first.height, colorSpace: first.colorSpace))
+                        nightscapeOverlay = NightscapeCompositor.hintOverlay(
+                            skyAlpha: composited.skyAlpha, width: first.width, height: first.height
+                        ).map { NSImage(cgImage: $0, size: NSSize(width: first.width, height: first.height)) }
+                        if mode == "Median" { notes.append("新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました") }
+                        if composited.groundFallbackCount > 0 {
+                            notes.append("地上の位置合わせができなかった\(composited.groundFallbackCount)枚は、隣のフレームと同じ動きとして合成しました")
+                        }
+                    case .notNeeded(let reason):
+                        notes.append(reason)
+                        alignFrames = true
+                    }
+                } catch {
+                    notes.append("新星景モードで合成できなかったため、空と地上を分けずに合成しました（\(error.localizedDescription)）")
+                }
+            }
+
             var skyFrames = calibratedFrames.map(\.image)
-            if doAlign {
+            if nightscapeImage == nil && alignFrames {
                 guard let baseFrame = calibratedFrames.first(where: { $0.file.id == base.id }),
                       let baseReferenceURL = self.writeTemporaryTIFF(baseFrame.image, prefix: "base") else {
                     self.finishStackingWithError("基準画像を位置合わせ用に準備できませんでした")
@@ -639,9 +706,11 @@ class StackingStateController {
             default:               sMode = .average
             }
 
-            let skyStacked = self.stack(images: skyFrames, mode: sMode)
             let result: NSImage?
-            if useSkyGroundMask, let maskImg = mask {
+            if let nightscapeImage {
+                result = nightscapeImage
+            } else if useSkyGroundMask && !nightscape, let maskImg = mask {
+                let skyStacked = self.stack(images: skyFrames, mode: sMode)
                 // 地上側は星用の変形を適用せず、固定構図のままノイズ低減する。
                 let groundMode: ImageStacker.StackMode = (mode == "Median") ? .median : .average
                 let groundStacked = self.stack(images: calibratedFrames.map(\.image), mode: groundMode)
@@ -652,7 +721,7 @@ class StackingStateController {
                     featherRadius: maskFeather
                 )
             } else {
-                result = skyStacked
+                result = self.stack(images: skyFrames, mode: sMode)
             }
 
             guard let finalResult = result else {
@@ -670,11 +739,15 @@ class StackingStateController {
                 self.stackedResultMetadata = resolvedBaseMetadata
                 self.previewImage = nil
                 self.stackingProgress = 1.0
+                if let nightscapeOverlay { self.maskBitmap = nightscapeOverlay }
+                var status: String
                 if let rawFallbackReason {
-                    self.stackingStatus = "✅ スタッキング完了（RAWのまま合成できなかったため現像済み画像で合成: \(rawFallbackReason)）"
+                    status = "✅ スタッキング完了（RAWのまま合成できなかったため現像済み画像で合成: \(rawFallbackReason)）"
                 } else {
-                    self.stackingStatus = "✅ スタッキング完了！"
+                    status = nightscapeImage != nil ? "✅ スタッキング完了！（新星景モードで合成）" : "✅ スタッキング完了！"
                 }
+                for note in notes { status += "\n\(note)" }
+                self.stackingStatus = status
                 self.isStacking = false
                 self.showResult = true
                 self.notifyStateChanged()
@@ -712,6 +785,23 @@ class StackingStateController {
         case .median, .compareBright:
             return ImageStacker.stack(images: images, mode: mode)
         }
+    }
+
+    /// センサーの向きのマスク画像を、表示（撮影時）の向きにする
+    static func displayOrientedOverlay(_ image: CGImage?, orientation: Int) -> NSImage? {
+        guard let image else { return nil }
+        let displayOrientation = CGImagePropertyOrientation(rawValue: UInt32(orientation)) ?? .up
+        guard displayOrientation != .up else {
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }
+        let oriented = CIImage(cgImage: image).oriented(displayOrientation)
+        let extent = oriented.extent
+        let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
+        guard let rendered = context.createCGImage(
+            oriented.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY)),
+            from: CGRect(origin: .zero, size: extent.size), format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        ) else { return nil }
+        return NSImage(cgImage: rendered, size: NSSize(width: rendered.width, height: rendered.height))
     }
 
     // ── マスクブレンド ──

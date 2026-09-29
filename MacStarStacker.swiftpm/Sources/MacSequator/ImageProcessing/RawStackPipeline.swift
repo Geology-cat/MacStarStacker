@@ -132,7 +132,17 @@ enum RawStackPipeline {
         case .bayer:
             result = try stackBayer(input: input, info: info, calibrator: calibrator, pixelCount: pixelCount, progress: progress)
         case .cameraRGB where input.usesNightscape:
-            result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
+            do {
+                result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
+            } catch let error as NightscapeCompositor.CompositorError {
+                // 星・地上の位置合わせができないときは、空と地上を分けずに（位置合わせの設定どおりに）合成する
+                var plain = input
+                plain.nightscape = false
+                plain.skyGroundMask = nil
+                guard var fallback = try stack(plain, progress: progress) else { throw PipelineError(message: error.message) }
+                fallback.note = "新星景モードで合成できなかったため、空と地上を分けずに合成しました（\(error.message)）"
+                return fallback
+            }
         case .cameraRGB:
             result = try stackCameraRGB(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
         }
@@ -351,24 +361,19 @@ enum RawStackPipeline {
         let frameBytes = UInt64(width * height * 3 * MemoryLayout<UInt16>.size)
         let cacheFrames = UInt64(input.lights.count) * frameBytes <= ProcessInfo.processInfo.physicalMemory / 4
 
-        let outcome: NightscapeCompositor.Outcome
-        do {
-            outcome = try NightscapeCompositor.compose(
-                frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
-                cacheFrames: cacheFrames,
-                loadFrame: { index in
-                    if index == baseIndex { return base.pixels }
-                    let frame = try demosaic(index)
-                    guard frame.width == width, frame.height == height else {
-                        throw PipelineError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
-                    }
-                    return frame.pixels
-                },
-                progress: { fraction, status in progress(0.04 + fraction * 0.86, status) }
-            )
-        } catch let error as NightscapeCompositor.CompositorError {
-            throw PipelineError(message: error.message)
-        }
+        let outcome = try NightscapeCompositor.compose(
+            frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
+            cacheFrames: cacheFrames,
+            loadFrame: { index in
+                if index == baseIndex { return base.pixels }
+                let frame = try demosaic(index)
+                guard frame.width == width, frame.height == height else {
+                    throw PipelineError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
+                }
+                return frame.pixels
+            },
+            progress: { fraction, status in progress(0.04 + fraction * 0.86, status) }
+        )
 
         var note = input.mode == .median ? "新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました" : nil
         switch outcome {

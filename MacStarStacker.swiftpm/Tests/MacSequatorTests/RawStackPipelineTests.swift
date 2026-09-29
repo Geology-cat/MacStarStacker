@@ -120,6 +120,13 @@ final class RawStackPipelineTests: XCTestCase {
         let (b, _) = try makeBayerDNG("b.dng") { _, _, _ in 1000 }
         XCTAssertEqual(RawStackPipeline.route(for: input(lights: [a, b], mode: .average, align: false)), .bayer)
         XCTAssertEqual(RawStackPipeline.route(for: input(lights: [a, b], mode: .average, align: true)), .cameraRGB)
+        // 新星景モードは位置合わせの設定に関係なくカメラ色空間RGB。比較明では使わない（塗ったマスクで分ける）
+        var nightscape = input(lights: [a, b], mode: .median, align: false)
+        nightscape.nightscape = true
+        XCTAssertEqual(RawStackPipeline.route(for: nightscape), .cameraRGB)
+        var compareBright = input(lights: [a, b], mode: .compareBright, align: false)
+        compareBright.nightscape = true
+        XCTAssertEqual(RawStackPipeline.route(for: compareBright), .bayer)
         let jpeg = directory.appendingPathComponent("frame.jpg")
         try Data([0xFF, 0xD8]).write(to: jpeg)
         XCTAssertNil(RawStackPipeline.route(for: input(lights: [a, jpeg], mode: .average)))

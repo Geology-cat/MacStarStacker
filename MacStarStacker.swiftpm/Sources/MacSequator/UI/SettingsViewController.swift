@@ -72,6 +72,8 @@ public class SettingsViewController: NSViewController {
         target: nil,
         action: nil
     )
+    /// 新星景モード・比較明でのマスクの使い方の説明
+    private let skyGroundHintLabel = NSTextField(wrappingLabelWithString: "")
     private let brushModeSegmented = NSSegmentedControl()
     private let brushSizeSlider = NSSlider(value: 20, minValue: 5, maxValue: 150, target: nil, action: nil)
     private let brushSizeLabel = NSTextField(labelWithString: "20 px")
@@ -260,12 +262,16 @@ public class SettingsViewController: NSViewController {
         analyzeTrailsButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
         // カード2: コンポジット & マスク
-        let maskCard = SectionCardView(title: "合成 & 空・地上マスク")
+        let maskCard = SectionCardView(title: "空と地上（新星景モード）")
         skyGroundMaskCheckbox.translatesAutoresizingMaskIntoConstraints = false
         skyGroundMaskCheckbox.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         skyGroundMaskCheckbox.state = StackingStateController.shared.enableSkyGroundMask ? .on : .off
         skyGroundMaskCheckbox.target = self
         skyGroundMaskCheckbox.action = #selector(onSkyGroundMaskToggled)
+
+        skyGroundHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        skyGroundHintLabel.font = NSFont.systemFont(ofSize: 10)
+        skyGroundHintLabel.textColor = .secondaryLabelColor
 
         brushModeSegmented.translatesAutoresizingMaskIntoConstraints = false
         brushModeSegmented.segmentCount = 3
@@ -300,7 +306,6 @@ public class SettingsViewController: NSViewController {
         maskFeatherSlider.isContinuous = true
         maskFeatherSlider.target = self
         maskFeatherSlider.action = #selector(onMaskFeatherChanged)
-        maskFeatherSlider.toolTip = "空と地上の境界を合成時に滑らかにします（0 pxで無効）"
 
         maskFeatherLabel.translatesAutoresizingMaskIntoConstraints = false
         maskFeatherLabel.identifier = NSUserInterfaceItemIdentifier("MaskFeatherLabel")
@@ -315,6 +320,7 @@ public class SettingsViewController: NSViewController {
         clearMaskButton.action = #selector(onClearMaskClicked)
 
         maskCard.container.addSubview(skyGroundMaskCheckbox)
+        maskCard.container.addSubview(skyGroundHintLabel)
         maskCard.container.addSubview(brushModeSegmented)
         maskCard.container.addSubview(sizeTitle)
         maskCard.container.addSubview(brushSizeSlider)
@@ -329,7 +335,11 @@ public class SettingsViewController: NSViewController {
             skyGroundMaskCheckbox.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             skyGroundMaskCheckbox.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
-            brushModeSegmented.topAnchor.constraint(equalTo: skyGroundMaskCheckbox.bottomAnchor, constant: 8),
+            skyGroundHintLabel.topAnchor.constraint(equalTo: skyGroundMaskCheckbox.bottomAnchor, constant: 4),
+            skyGroundHintLabel.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
+            skyGroundHintLabel.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
+
+            brushModeSegmented.topAnchor.constraint(equalTo: skyGroundHintLabel.bottomAnchor, constant: 6),
             brushModeSegmented.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             brushModeSegmented.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
@@ -790,10 +800,15 @@ public class SettingsViewController: NSViewController {
         // スタック設定・光跡除去更新
         let isCompareBright = (state.stackMode == "Compare Bright")
         // 比較明合成でも選べる（星を合わせると星の軌跡が点になるため、比較明合成の既定はOFF）
-        alignCheckbox.state = state.isAlignmentEnabledForCurrentMode ? .on : .off
-        alignCheckbox.toolTip = isCompareBright
-            ? "ONにすると星の位置を合わせて合成します（星は軌跡ではなく点になります）"
-            : "星の位置を合わせて合成します"
+        // 新星景モードでは、空は星に・地上は地上に必ず位置合わせする
+        let nightscape = state.isNightscapeActive
+        alignCheckbox.state = (nightscape || state.isAlignmentEnabledForCurrentMode) ? .on : .off
+        alignCheckbox.isEnabled = !nightscape
+        alignCheckbox.toolTip = nightscape
+            ? "新星景モードでは、空は星に、地上は地上に合わせて合成します"
+            : (isCompareBright
+                ? "ONにすると星の位置を合わせて合成します（星は軌跡ではなく点になります）"
+                : "星の位置を合わせて合成します")
         trailRemovalCheckbox.isHidden = !isCompareBright
         trailRemovalCheckbox.state = state.enableTrailRemoval ? .on : .off
 
@@ -806,6 +821,16 @@ public class SettingsViewController: NSViewController {
 
         // マスクOFF時は、ブラシに関係する操作とキャンバス処理を完全に無効化する。
         skyGroundMaskCheckbox.state = state.enableSkyGroundMask ? .on : .off
+        skyGroundMaskCheckbox.title = isCompareBright
+            ? "空と地上を分けて合成（ブラシを使用）"
+            : "新星景モード（空と地上を自動で分けて合成）"
+        skyGroundMaskCheckbox.toolTip = isCompareBright
+            ? "塗ったマスクで、空は比較明、地上は平均で合成します"
+            : "空は星に、地上は地上に合わせて合成し、空と地上の境界は自動で判定します"
+        skyGroundHintLabel.stringValue = isCompareBright
+            ? "地上を緑、空を青のブラシで塗ってください。"
+            : "空と地上は自動で判定します。合成後に判定結果が表示されるので、違う所だけブラシで塗り直して再度合成できます。"
+        skyGroundHintLabel.isEnabled = state.enableSkyGroundMask
         switch state.brushMode {
         case .sky: brushModeSegmented.selectedSegment = 0
         case .ground: brushModeSegmented.selectedSegment = 1
@@ -816,8 +841,12 @@ public class SettingsViewController: NSViewController {
         brushModeSegmented.isEnabled = state.enableSkyGroundMask
         brushSizeSlider.isEnabled = state.enableSkyGroundMask
         brushSizeLabel.isEnabled = state.enableSkyGroundMask
-        maskFeatherSlider.isEnabled = state.enableSkyGroundMask
-        maskFeatherLabel.isEnabled = state.enableSkyGroundMask
+        // 新星景モードの境界のぼかしは画像の輪郭に沿って自動で決まる
+        maskFeatherSlider.isEnabled = state.enableSkyGroundMask && !nightscape
+        maskFeatherLabel.isEnabled = state.enableSkyGroundMask && !nightscape
+        maskFeatherSlider.toolTip = nightscape
+            ? "新星景モードでは、境界は画像の輪郭に沿って自動で滑らかになります"
+            : "空と地上の境界を合成時に滑らかにします（0 pxで無効）"
         maskFeatherSlider.doubleValue = Double(state.maskFeatherRadius)
         maskFeatherLabel.stringValue = "\(Int(round(state.maskFeatherRadius))) px"
         clearMaskButton.isEnabled = state.enableSkyGroundMask && state.maskBitmap != nil
