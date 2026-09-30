@@ -21,7 +21,7 @@ class StackingStateController {
     var baseImage: ImageFile? {
         didSet {
             updateBaseImageMetadata()
-            if oldValue?.id != baseImage?.id { scheduleNightscapeAnalysis() }
+            if oldValue?.id != baseImage?.id { nightscapeInputsDidChange() }
             notifyStateChanged()
         }
     }
@@ -50,7 +50,7 @@ class StackingStateController {
     var stackMode: String = "Average" { // "Average", "Median", "Compare Bright"
         didSet {
             guard oldValue != stackMode else { return }
-            scheduleNightscapeAnalysis()
+            nightscapeInputsDidChange()
             notifyStateChanged()
         }
     }
@@ -60,7 +60,7 @@ class StackingStateController {
     var enableSkyGroundMask: Bool = false {
         didSet {
             guard oldValue != enableSkyGroundMask else { return }
-            scheduleNightscapeAnalysis()
+            nightscapeInputsDidChange()
             notifyStateChanged()
         }
     }
@@ -130,7 +130,6 @@ class StackingStateController {
         }
     }
     private(set) var nightscapePrepared: NightscapePrepared?
-    private var nightscapeAnalysisWork: DispatchWorkItem?
     private var nightscapeAnalysisToken: CancellationToken?
     /// 実行中の解析の入力の組み合わせ（同じ入力の解析を途中からやり直さない）
     private var nightscapeAnalysisKey: String?
@@ -174,7 +173,7 @@ class StackingStateController {
         previewImage = last.previewImage
         invalidateTrailAnalysis()
         normalizeTimelapseRange()
-        scheduleNightscapeAnalysis()
+        nightscapeInputsDidChange()
         notifyStateChanged()
     }
 
@@ -226,7 +225,7 @@ class StackingStateController {
             invalidateTrailAnalysis()
             normalizeTimelapseRange()
         }
-        scheduleNightscapeAnalysis()
+        nightscapeInputsDidChange()
         notifyStateChanged()
 
         // バックグラウンドでメタデータを解析
@@ -278,7 +277,7 @@ class StackingStateController {
         }
         if previewImage?.id == file.id { previewImage = images[type]?.first }
         if baseImage?.id == file.id   { baseImage = images[.light]?.first }
-        scheduleNightscapeAnalysis()
+        nightscapeInputsDidChange()
         notifyStateChanged()
     }
 
@@ -292,7 +291,7 @@ class StackingStateController {
             normalizeTimelapseRange()
         }
         if removedPreview { previewImage = images[.light]?.first }
-        scheduleNightscapeAnalysis()
+        nightscapeInputsDidChange()
         notifyStateChanged()
     }
 
@@ -322,32 +321,26 @@ class StackingStateController {
         )
     }
 
-    /// 新星景モードで入力が変わったら、少し待ってから解析する（続けて変えたときに何度も解析しない）
-    func scheduleNightscapeAnalysis() {
-        nightscapeAnalysisWork?.cancel()
+    /// 新星景モードの入力（Light・基準画像・キャリブレーション画像・合成方法）が変わったとき。
+    /// 解析は「解析開始」で行う。前の解析と自動判定の結果（位置がずれている）は手放し、ブラシで塗った所は残す
+    func nightscapeInputsDidChange() {
         guard isNightscapeActive else {
             cancelNightscapeAnalysis()
             return
         }
-        // 入力が変わったら、前の解析と自動判定の結果（位置がずれている）はすぐに手放す（ブラシで塗った所は残す）
-        if let prepared = nightscapePrepared, prepared.key != currentNightscapeKey() {
+        let key = currentNightscapeKey()
+        if isAnalyzingNightscape, nightscapeAnalysisKey != key {
+            cancelNightscapeAnalysis()
+            nightscapeAnalysisStatus = "Light・基準画像などが変わったため解析を中止しました。「解析開始」を押してください"
+        }
+        if let prepared = nightscapePrepared, prepared.key != key {
             nightscapePrepared = nil
             maskBitmap = NightscapeCompositor.userStrokesOnly(maskBitmap)
+            nightscapeAnalysisStatus = "Light・基準画像などが変わりました。「解析開始」を押すと空と地上を判定し直します"
         }
-        let work = DispatchWorkItem { [weak self] in self?.analyzeNightscapeIfNeeded() }
-        nightscapeAnalysisWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
-    }
-
-    private func analyzeNightscapeIfNeeded() {
-        guard let key = currentNightscapeKey(), nightscapePrepared?.key != key else { return }
-        // 同じ入力の解析が実行中なら、そのまま続ける
-        if isAnalyzingNightscape && nightscapeAnalysisKey == key { return }
-        analyzeNightscape()
     }
 
     private func cancelNightscapeAnalysis() {
-        nightscapeAnalysisWork?.cancel()
         nightscapeAnalysisToken?.cancel()
         nightscapeAnalysisToken = nil
         nightscapeAnalysisKey = nil
