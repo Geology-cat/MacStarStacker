@@ -1,6 +1,7 @@
 #include "LibRawBridge.h"
 
 #include <libraw.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,6 +181,37 @@ int32_t LRDemosaicCameraRGB(const char *path, const uint16_t *replacementBayer, 
         }
     }
 
+    // 黒レベルを引いた値に小さな台（pedestal）を足してから現像する。LibRaw は黒より暗い値（ノイズ）を0に切り捨てるため、
+    // そのまま合成すると最も暗い所の平均が持ち上がり、階調が失われる。台はDNGの黒レベルとして記録する
+    {
+        const int width = lr->sizes.width, height = lr->sizes.height, rawWidth = lr->sizes.raw_width;
+        const int top = lr->sizes.top_margin, left = lr->sizes.left_margin;
+        const double blackMean = (info->blackLevel[0] + info->blackLevel[1] + info->blackLevel[2] + info->blackLevel[3]) / 4.0;
+        const double range = info->whiteLevel - blackMean;
+        const int pedestal = range > 0 ? (int)fmax(16.0, round(0.02 * range)) : 0;
+        if (pedestal > 0 && lr->rawdata.raw_image) {
+            for (int row = 0; row < height; row++) {
+                uint16_t *line = lr->rawdata.raw_image + (size_t)(row + top) * (size_t)rawWidth + (size_t)left;
+                const double *black = info->blackLevel + (row & 1) * 2;
+                for (int col = 0; col < width; col++) {
+                    const double value = (double)line[col] - black[col & 1] + pedestal;
+                    line[col] = value <= 0 ? 0 : (value >= 65535 ? 65535 : (uint16_t)(value + 0.5));
+                }
+            }
+            // 黒レベルは引いてあるので LibRaw では引かない。飽和値は台の分だけ上げる
+            lr->params.user_black = 0;
+            for (int c = 0; c < 4; c++) lr->params.user_cblack[c] = 0;
+            lr->color.cblack[4] = lr->color.cblack[5] = 0;
+            lr->params.user_sat = (int)round(range + pedestal);
+            info->outputBlack = 65535.0 * pedestal / (range + pedestal);
+            info->outputWhite = 65535.0;
+        } else {
+            lr->params.user_sat = (int)info->whiteLevel;
+            info->outputBlack = 0;
+            info->outputWhite = info->whiteLevel > blackMean ? 65535.0 * (info->whiteLevel - blackMean) / info->whiteLevel : 65535.0;
+        }
+    }
+
     // カメラ色空間のまま（色変換なし）、ガンマ・自動明るさなし、回転なし。
     // デモザイクは撮影時ホワイトバランスを掛けた状態で行う（掛けないと、R・G・Bの差が大きい色の被写体
     // （照明で黄色い岩肌など）で補間の方向判定を誤り、横・縦の短い線状のノイズが出る）。
@@ -207,7 +239,6 @@ int32_t LRDemosaicCameraRGB(const char *path, const uint16_t *replacementBayer, 
     lr->params.use_camera_wb = 0;
     lr->params.use_auto_wb = 0;
     lr->params.user_flip = 0;
-    lr->params.user_sat = (int)info->whiteLevel;
 
     int code = libraw_dcraw_process(lr);
     if (code != LIBRAW_SUCCESS) {

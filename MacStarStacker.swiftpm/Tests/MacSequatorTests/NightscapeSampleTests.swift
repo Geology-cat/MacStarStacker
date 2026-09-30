@@ -32,6 +32,8 @@ final class NightscapeSampleTests: XCTestCase {
         })
         print("合成時間: \(Date().timeIntervalSince(start))秒 補足: \(result.note ?? "なし")")
 
+        // RAW（DNG）での書き出し
+        try result.writeDNG(metadata: nil, embedLensProfile: false, to: output.appendingPathComponent("nightscape.dng"))
         // 合成したカメラ色空間RGB（現像前、16bit、R・G・Bの順）
         try result.pixels.withUnsafeBytes { Data($0) }.write(to: output.appendingPathComponent("pixels.raw"))
         // 表示用の現像画像（撮影時の向き）

@@ -31,6 +31,8 @@ struct RawStackResult {
     var skyAlpha: [Float]? = nil
     /// 合成方法についての補足（新星景モードで分けて合成しなかった理由など）
     var note: String? = nil
+    /// cameraRGB の黒レベル（黒より暗いノイズを残すための台）
+    var blackLevel: Double = 0
 
     var modeDescription: String {
         switch kind {
@@ -51,7 +53,7 @@ struct RawStackResult {
             )
         case .cameraRGB:
             try DNGWriter.writeCameraRGB(
-                pixels: pixels, width: width, height: height, whiteLevel: whiteLevel,
+                pixels: pixels, width: width, height: height, blackLevel: blackLevel, whiteLevel: whiteLevel,
                 camera: camera, previewSource: previewImage, metadata: metadata,
                 embedLensProfile: embedLensProfile, to: url
             )
@@ -329,11 +331,11 @@ enum RawStackPipeline {
         progress(0.92, "RAWを現像してプレビューを作成中...")
         let baseline = baselineExposure(for: input.lights[baseIndex])
         let rendered = try render(kind: .cameraRGB, pixels: pixels, info: base.info, width: width, height: height,
-                                  whiteLevel: base.whiteLevel, baselineExposure: baseline)
+                                  whiteLevel: base.whiteLevel, blackLevel: base.blackLevel, baselineExposure: baseline)
         return RawStackResult(
             kind: .cameraRGB, info: base.info, pixels: pixels, width: width, height: height,
             whiteLevel: base.whiteLevel, baselineExposure: baseline,
-            previewImage: rendered.preview, displayImage: rendered.display
+            previewImage: rendered.preview, displayImage: rendered.display, blackLevel: base.blackLevel
         )
     }
 
@@ -387,12 +389,12 @@ enum RawStackPipeline {
             progress(0.92, "RAWを現像してプレビューを作成中...")
             let baseline = baselineExposure(for: input.lights[baseIndex])
             let rendered = try render(kind: .cameraRGB, pixels: composited.pixels, info: base.info, width: width, height: height,
-                                      whiteLevel: base.whiteLevel, baselineExposure: baseline)
+                                      whiteLevel: base.whiteLevel, blackLevel: base.blackLevel, baselineExposure: baseline)
             return RawStackResult(
                 kind: .cameraRGB, info: base.info, pixels: composited.pixels, width: width, height: height,
                 whiteLevel: base.whiteLevel, baselineExposure: baseline,
                 previewImage: rendered.preview, displayImage: rendered.display,
-                skyAlpha: composited.skyAlpha, note: note
+                skyAlpha: composited.skyAlpha, note: note, blackLevel: base.blackLevel
             )
         case .notNeeded(let reason):
             // 空と地上を分ける必要が無い（できない）ときは、星に合わせた通常の合成にする
@@ -602,6 +604,7 @@ enum RawStackPipeline {
         width: Int,
         height: Int,
         whiteLevel: Double,
+        blackLevel: Double = 0,
         baselineExposure: Double
     ) throws -> (preview: CGImage, display: NSImage) {
         let temporaryURL = FileManager.default.temporaryDirectory
@@ -616,7 +619,7 @@ enum RawStackPipeline {
                                      camera: camera, previewSource: placeholder, metadata: nil,
                                      embedLensProfile: false, to: temporaryURL)
         case .cameraRGB:
-            try DNGWriter.writeCameraRGB(pixels: pixels, width: width, height: height, whiteLevel: whiteLevel,
+            try DNGWriter.writeCameraRGB(pixels: pixels, width: width, height: height, blackLevel: blackLevel, whiteLevel: whiteLevel,
                                          camera: camera, previewSource: placeholder, metadata: nil,
                                          embedLensProfile: false, to: temporaryURL)
         }

@@ -84,17 +84,31 @@ final class RawStackPipelineTests: XCTestCase {
         let raw: [UInt16] = [3000, 2000, 1200]
         let (url, _) = try makeBayerDNG("flat.dng") { _, _, color in raw[Int(color)] }
         let frame = try RawDecoder.demosaicCameraRGB(from: url)
-        var sums = [Double](repeating: 0, count: 3)
+        let count = Double(frame.width * frame.height)
+        var means = [Double](repeating: 0, count: 3)
         for i in 0..<(frame.width * frame.height) {
-            for c in 0..<3 { sums[c] += Double(frame.pixels[i * 3 + c]) }
+            for c in 0..<3 { means[c] += Double(frame.pixels[i * 3 + c]) / count }
         }
+        // 出力は黒が blackLevel、センサーの飽和が whiteLevel になる線形の値
+        let above = means.map { $0 - frame.blackLevel }
         let expectedRed = Double(raw[0] - black) / Double(raw[1] - black)
         let expectedBlue = Double(raw[2] - black) / Double(raw[1] - black)
-        XCTAssertEqual(sums[0] / sums[1], expectedRed, accuracy: expectedRed * 0.01)
-        XCTAssertEqual(sums[2] / sums[1], expectedBlue, accuracy: expectedBlue * 0.01)
-        // 緑は以前（ホワイトバランスなしでデモザイク）と同じ明るさ: (値 - 黒) / 白 * 65535（CameraRGBFrame.whiteLevel と同じ規則）
-        let expectedGreen = Double(raw[1] - black) / white * 65535
-        XCTAssertEqual(sums[1] / Double(frame.width * frame.height), expectedGreen, accuracy: expectedGreen * 0.01)
+        XCTAssertEqual(above[0] / above[1], expectedRed, accuracy: expectedRed * 0.01)
+        XCTAssertEqual(above[2] / above[1], expectedBlue, accuracy: expectedBlue * 0.01)
+        let expectedGreen = Double(raw[1] - black) / (white - Double(black)) * (frame.whiteLevel - frame.blackLevel)
+        XCTAssertEqual(above[1], expectedGreen, accuracy: expectedGreen * 0.01)
+    }
+
+    func testCameraRGBDemosaicKeepsValuesBelowBlack() throws {
+        // 黒より暗いノイズ（生の値が黒レベル未満）を0に切り捨てず、黒レベルの台の下に残す。
+        // 切り捨てると合成したときに最も暗い所の平均が持ち上がる
+        let (url, _) = try makeBayerDNG("dark.dng") { x, y, _ in (x + y) % 2 == 0 ? black - 8 : black + 8 }
+        let frame = try RawDecoder.demosaicCameraRGB(from: url)
+        XCTAssertGreaterThan(frame.blackLevel, 0)
+        let values = frame.pixels.map(Double.init)
+        let mean = values.reduce(0, +) / Double(values.count)
+        XCTAssertEqual(mean, frame.blackLevel, accuracy: frame.blackLevel * 0.05, "黒の上下のノイズの平均は黒レベルのまま")
+        XCTAssertGreaterThan(values.min() ?? 0, 0, "黒より暗い値が0に切り捨てられていない")
     }
 
     func testLinearDNGIsNotTreatedAsBayer() throws {
