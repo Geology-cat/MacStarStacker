@@ -1,0 +1,154 @@
+% MacStarStacker 使い方ガイドの体裁と、スクリーンショットに番号・矢印・枠を描く命令
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{manual-style}
+
+\RequirePackage{graphicx}
+\RequirePackage{float}
+\floatplacement{figure}{H}
+% 画面の説明が多いので、本文も見出しと同じゴシック体（和文）・サンセリフ（欧文）にする
+\renewcommand{\familydefault}{\sfdefault}
+\renewcommand{\kanjifamilydefault}{\gtdefault}
+\RequirePackage{xcolor}
+\RequirePackage{tikz}
+\usetikzlibrary{calc,fit,arrows.meta,positioning,shapes.geometric}
+\RequirePackage[most]{tcolorbox}
+\RequirePackage{enumitem}
+\RequirePackage{booktabs}
+\RequirePackage{tabularx}
+\RequirePackage{array}
+\RequirePackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=accentdark,urlcolor=accentdark,
+  pdftitle={MacStarStacker 使い方ガイド},pdfauthor={MacStarStacker}}
+
+% ── 色 ─────────────────────────────────────────
+% 暗い画面の上でも目立つ橙色を、矢印・番号・枠に使う
+\definecolor{accent}{HTML}{FF8C1A}
+\definecolor{accentdark}{HTML}{C45E00}
+\definecolor{skyblue}{HTML}{2F6BFF}
+\definecolor{groundgreen}{HTML}{19B34A}
+\definecolor{notebg}{HTML}{EEF4FF}
+\definecolor{notebar}{HTML}{3A6FD8}
+\definecolor{warnbg}{HTML}{FFF3E6}
+\definecolor{warnbar}{HTML}{E07000}
+\definecolor{tipbg}{HTML}{EEF9EE}
+\definecolor{tipbar}{HTML}{2E9E4F}
+
+% ── 囲み ───────────────────────────────────────
+\newtcolorbox{memo}[1][メモ]{enhanced,breakable,colback=notebg,colframe=notebar,
+  boxrule=0pt,leftrule=3pt,arc=2pt,left=8pt,right=8pt,top=4pt,bottom=4pt,
+  fonttitle=\sffamily\bfseries,coltitle=notebar,colbacktitle=notebg,title={#1},
+  attach title to upper={\quad}}
+\newtcolorbox{caution}[1][注意]{enhanced,breakable,colback=warnbg,colframe=warnbar,
+  boxrule=0pt,leftrule=3pt,arc=2pt,left=8pt,right=8pt,top=4pt,bottom=4pt,
+  fonttitle=\sffamily\bfseries,coltitle=warnbar,colbacktitle=warnbg,title={#1},
+  attach title to upper={\quad}}
+\newtcolorbox{hint}[1][ヒント]{enhanced,breakable,colback=tipbg,colframe=tipbar,
+  boxrule=0pt,leftrule=3pt,arc=2pt,left=8pt,right=8pt,top=4pt,bottom=4pt,
+  fonttitle=\sffamily\bfseries,coltitle=tipbar,colbacktitle=tipbg,title={#1},
+  attach title to upper={\quad}}
+
+% 手順（大きな番号付き）
+\newlist{steps}{enumerate}{1}
+\setlist[steps]{label=\protect\stepnum{\arabic*},leftmargin=2.2em,itemsep=0.6ex,topsep=0.8ex}
+\DeclareRobustCommand\stepnum[1]{\tikz[baseline=(n.base)]\node[circle,fill=accentdark,text=white,
+  font=\sffamily\bfseries\small,inner sep=0pt,minimum size=1.35em](n){#1};}
+
+% 本文中の番号（図の番号と同じ見た目）
+\DeclareRobustCommand\num[1]{\tikz[baseline=(n.base)]\node[circle,fill=accent,draw=white,line width=0.6pt,
+  text=white,font=\sffamily\bfseries\footnotesize,inner sep=0pt,minimum size=1.3em](n){#1};}
+% 画面の部品の名前（ボタンなど）
+\DeclareRobustCommand\ui[1]{\textsf{\bfseries「#1」}}
+\DeclareRobustCommand\key[1]{\tikz[baseline=(k.base)]\node[draw=black!50,fill=black!4,rounded corners=2pt,
+  inner xsep=3pt,inner ysep=1.5pt,font=\sffamily\small](k){#1};}
+\newcommand\menu[1]{\textsf{#1}}
+
+% ── スクリーンショットに描く ─────────────────────
+% figures/<画面>.coords.tex（DocumentationScreenshotTests が書き出す）の
+% \shotmark{画面}{部品}{中心x}{中心y}{幅}{高さ}（画像の幅・高さを1とした値）で部品の位置を読む
+\makeatletter
+\newcommand\shotmark[6]{\expandafter\gdef\csname shotmark@#1@#2\endcsname{{#3}{#4}{#5}{#6}}}
+\def\shot@set#1#2#3#4{\def\shotx{#1}\def\shoty{#2}\def\shotw{#3}\def\shoth{#4}}
+\newcommand\shot@get[1]{%
+  \@ifundefined{shotmark@\shot@name @#1}%
+    {\PackageError{manual-style}{部品 #1 の位置がありません（\shot@name）}{}\shot@set{0.5}{0.5}{0}{0}}%
+    {\expandafter\expandafter\expandafter\shot@set\csname shotmark@\shot@name @#1\endcsname}}
+% 部品を囲む四角のノード（名前 m-<部品>）を作る
+\newcommand\shot@node[1]{%
+  \shot@get{#1}%
+  \path (\shotx-\shotw/2,\shoty-\shoth/2) coordinate (m-#1-sw) (\shotx+\shotw/2,\shoty+\shoth/2) coordinate (m-#1-ne);
+  \node[fit=(m-#1-sw)(m-#1-ne),inner sep=0pt] (m-#1) {};}
+
+% \begin{screenshot}[幅]{画面} … \end{screenshot}
+% 中では、画像の左下を(0,0)、右上を(1,1)とした座標で描ける
+\newenvironment{screenshot}[2][\linewidth]{%
+  \def\shot@name{#2}%
+  \InputIfFileExists{figures/#2.coords.tex}{}{}%
+  \begin{tikzpicture}
+  \node[anchor=south west,inner sep=0pt] (img) {\includegraphics[width=#1]{figures/#2}};
+  \draw[black!35,line width=0.4pt] (img.south west) rectangle (img.north east);
+  \begin{scope}[x={(img.south east)},y={(img.north west)}]
+}{\end{scope}\end{tikzpicture}}
+
+\tikzset{
+  shotbox/.style={draw=accent,line width=1.6pt,rounded corners=2pt},
+  shotcallout/.style={circle,fill=accent,draw=white,line width=0.8pt,text=white,
+    font=\sffamily\bfseries\small,inner sep=0pt,minimum size=1.45em},
+  shotarrow/.style={draw=accent,line width=1.4pt,-{Stealth[length=2.6mm,width=2.2mm]}},
+  shotlabel/.style={fill=accent,text=white,font=\sffamily\bfseries\footnotesize,
+    rounded corners=2pt,inner xsep=4pt,inner ysep=2pt,align=center},
+}
+
+% \markbox{部品}: 部品を枠で囲む
+\newcommand\markbox[1]{\shot@node{#1}\draw[shotbox] (m-#1.south west) rectangle (m-#1.north east);}
+% \callout{番号}{部品}{向き（度）}{距離（cm）}: 部品から指定の向き・距離に番号を置き、部品へ矢印を引く
+\newcommand\callout[4]{\shot@node{#2}%
+  \node[shotcallout] (c-#1) at ($(m-#2.center)+(#3:#4cm)$) {#1};
+  \draw[shotarrow] (c-#1) -- (m-#2);}
+% \calloutin{番号}{部品}{位置（north west など）}: 部品の中の角に番号だけを置く（大きな領域用）
+\newcommand\calloutin[3]{\shot@node{#2}%
+  \node[shotcallout,anchor=#3] at (m-#2.#3) {#1};}
+% \calloutabove{番号}{部品} / \calloutbelow{番号}{部品}: 画像の上（下）の外に番号を置き、部品の上端（下端）へ矢印を引く（大きな領域用）
+\newcommand\calloutabove[2]{\shot@node{#2}%
+  \node[shotcallout] (c-#1) at ($(m-#2.north |- img.north)+(0,0.5cm)$) {#1};
+  \draw[shotarrow] (c-#1) -- (m-#2.north |- img.north);}
+\newcommand\calloutbelow[2]{\shot@node{#2}%
+  \node[shotcallout] (c-#1) at ($(m-#2.south |- img.south)+(0,-0.5cm)$) {#1};
+  \draw[shotarrow] (c-#1) -- (m-#2.south |- img.south);}
+% \calloutleft{番号}{部品} / \calloutright{番号}{部品}: 画像の左（右）の外に番号を置き、部品の左端（右端）へ矢印を引く
+% 省略できる1つめの引数で、番号を上下にずらせる（cm。近い部品の番号が重なるとき）
+\newcommand\calloutleft[3][0]{\shot@node{#3}%
+  \node[shotcallout] (c-#2) at ($(img.west |- m-#3.center)+(-0.55cm,#1cm)$) {#2};
+  \draw[shotarrow] (c-#2) -- (m-#3.west);}
+\newcommand\calloutright[3][0]{\shot@node{#3}%
+  \node[shotcallout] (c-#2) at ($(img.east |- m-#3.center)+(0.55cm,#1cm)$) {#2};
+  \draw[shotarrow] (c-#2) -- (m-#3.east);}
+% \calloutleftat{番号}{x}{y} / \calloutrightat{番号}{x}{y}: 画像の中の位置へ、左（右）の外から矢印を引く
+\newcommand\calloutleftat[3]{%
+  \node[shotcallout] (c-#1) at ($(img.west |- #2,#3)+(-0.55cm,0)$) {#1};
+  \draw[shotarrow] (c-#1) -- (#2,#3);}
+\newcommand\calloutrightat[3]{%
+  \node[shotcallout] (c-#1) at ($(img.east |- #2,#3)+(0.55cm,0)$) {#1};
+  \draw[shotarrow] (c-#1) -- (#2,#3);}
+% \calloutat{番号}{x}{y}{向き}{距離}: 画像の中の位置（左下(0,0)・右上(1,1)）に番号と矢印を付ける（部品ではない所用）
+\newcommand\calloutat[5]{%
+  \node[shotcallout] (c-#1) at ($(#2,#3)+(#4:#5cm)$) {#1};
+  \draw[shotarrow] (c-#1) -- (#2,#3);}
+% \circleat{x}{y}{半径cm}: 画像の中の位置を丸で囲む
+\newcommand\circleat[3]{\draw[shotbox] (#1,#2) circle (#3cm);}
+% \labelat{部品}{向き}{距離}{文字}: 部品へ矢印付きの短い説明を付ける
+\newcommand\labelat[4]{\shot@node{#1}%
+  \node[shotlabel] (l-#1) at ($(m-#1.center)+(#2:#3cm)$) {#4};
+  \draw[shotarrow] (l-#1) -- (m-#1);}
+\makeatother
+
+% \installshot{画面}{幅}{描く命令}: 画面の画像があれば番号・矢印を付けて載せる（撮る前は枠だけ）
+\newcommand\installshot[3]{%
+  \IfFileExists{figures/#1.jpg}{\begin{screenshot}[#2]{#1}#3\end{screenshot}}{%
+  \IfFileExists{figures/#1.png}{\begin{screenshot}[#2]{#1}#3\end{screenshot}}{%
+  \fbox{\parbox[c][4cm][c]{#2}{\centering\sffamily スクリーンショット（\detokenize{#1}）}}}}}
+
+% 図の下の番号付きの説明
+\newenvironment{callouts}{\begin{itemize}[leftmargin=2em,itemsep=0.3ex,topsep=0.6ex]}{\end{itemize}}
+\newcommand\co[1]{\item[\num{#1}]}
+
+\endinput

@@ -1,0 +1,64 @@
+\clearpage
+\section{比較明合成（星の軌跡）}\label{sec:startrail}
+
+比較明合成では、画素ごとにいちばん明るい値を残すので、星が動いた跡が線（スタートレイル）になります。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}[0.46\linewidth]{settings_comparebright}
+  \calloutleft{1}{mode}
+  \calloutleft{2}{align}
+  \calloutleft{3}{trail}
+  \calloutleft{4}{analyzetrails}
+  \calloutleft{5}{mask}
+\end{screenshot}
+\caption{比較明合成を選んだところ}
+\end{figure}
+
+\begin{callouts}
+\co{1} スタック方式で\ui{比較明合成 (Star Trails)}を選びます。
+\co{2} \ui{アライメント}：最初は外れています。入れると星が点になります（ふつうは外したまま）。
+\co{3} \ui{飛行機・人工衛星の光跡を除去}：チェックを入れると、合成の前に飛行機や人工衛星の光跡を探して取り除きます。
+\co{4} \ui{光跡を解析して確認…}：光跡を探して、確認の画面を開きます（下）。
+\co{5} \ui{空と地上を分けて合成（ブラシを使用）}：ブラシで塗った所を、空は比較明、地上は平均で合成します（下）。
+\end{callouts}
+
+\subsection{飛行機・人工衛星の光跡を取り除く}
+
+\ui{飛行機・人工衛星の光跡を除去}にチェックを入れて\ui{★ スタッキング開始}（または\ui{光跡を解析して確認…}）を押すと、全部の写真から光跡を探し、確認の画面が開きます。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}{trail_review}
+  \calloutleft{1}{list}
+  \calloutabove{2}{highlight}
+  \calloutabove{3}{protect}
+  \calloutabove{4}{all}
+  \calloutbelow{5}{apply}
+\end{screenshot}
+\caption{光跡の確認の画面}
+\end{figure}
+
+\begin{callouts}
+\co{1} 見つかった光跡の一覧です。\ui{除去}のチェックが入っているものを取り除きます。残したいもの（流れ星など）はチェックを外します。
+\co{2} \ui{光跡ハイライトを表示}：見つかった光跡を色で示します。外すと元の写真を確かめられます。
+\co{3} \ui{流星候補を保護}：流れ星らしいものを、取り除く対象から外します。
+\co{4} \ui{全選択}・\ui{全解除}：全部のチェックを入れる・外します。
+\co{5} \ui{確定してスタッキング開始}：チェックの入った光跡を取り除いて、合成を始めます。
+\end{callouts}
+
+光跡を取り除いた所は、前後の写真の同じ場所で埋めます。
+
+\begin{memo}[星の軌跡を長くするには]
+星の軌跡の長さは、撮影していた時間で決まります。三脚に固定して（星を追尾せずに）、長い時間続けて撮った写真を使ってください。
+星を追尾して撮った写真では、星は止まったままで、地上が流れます。
+\end{memo}
+
+\subsection{空と地上を分けて合成する（比較明）}
+
+比較明合成では、地上の部分もいちばん明るい値になるため、地上のノイズが目立つことがあります。
+\ui{空と地上を分けて合成（ブラシを使用）}にチェックを入れ、プレビューで地上を\ui{地上（緑）}、空を\ui{空（青）}のブラシで塗ると、空は比較明、地上は平均で合成します。
+\begin{itemize}[itemsep=0.3ex]
+  \item 比較明合成では、空と地上の自動の判定は行いません。地上をブラシで塗ってください（塗らずにスタッキング開始を押すと、メッセージが出ます）。
+  \item \ui{境界ぼかし}（0〜100 px、最初は 12 px）で、塗った境目をぼかします。
+\end{itemize}

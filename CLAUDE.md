@@ -84,6 +84,13 @@ bash MacStarStacker.swiftpm/build_app.sh
 - `swift test` はビルドしているMacのアーキテクチャだけで動く。開発用のMacはIntelなので、arm64 版は実行して確認できない。
 - 10.13 での実際の動作は、10.13 の仮想マシンか実機で確認する必要がある（CIでは実行できない）。
 
+## 使い方ガイド（docs/manual）
+
+- LaTeX（LuaLaTeX・jlreq）で書き、`docs/manual/build.sh` で `docs/MacStarStacker使い方ガイド.pdf` にする。両ブランチで同じ内容にする。
+- 画面の説明を変える変更（ボタン・設定項目の追加や文言の変更など）をしたら、`DocumentationScreenshotTests` で
+  スクリーンショットを撮り直し（README の「使い方ガイドの作成」）、本文と PDF も直す。撮影は `main` で行う。
+- 公開リポジトリなので、スクリーンショットに個人の情報（アカウント名など）を写さない。
+
 ## ブランチ間の機能差分
 
 | 項目 | main | macos10.13 |

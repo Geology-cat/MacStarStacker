@@ -1,0 +1,37 @@
+\clearpage
+\section{結果を書き出す}\label{sec:export}
+
+合成が終わったら、\ui{書き出し \& 実行}の欄で形式を選び、\ui{結果を書き出す…}（\key{⌘}\,\key{S}）を押します。
+保存する場所と名前を決めるウインドウが開くので、\ui{保存}を押します。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{l X X}
+\toprule
+形式 & 中身 & こんなときに \\
+\midrule
+RAW (DNG) & RAW の写真だけを合成したときは、センサーのデータのまま（現像前）の DNG。そうでないときは 16bit のリニア DNG。 & Lightroom・Camera Raw などで、元の RAW と同じように露出・ホワイトバランス・ハイライトなどを調整したいとき（おすすめ）。 \\
+16bit TIFF & 現像した 16bit のカラー画像。 & Photoshop などで仕上げるとき。 \\
+32bit FITS & 32bit 浮動小数点のカラー画像（R・G・B の3面）。 & Siril・PixInsight などの天体画像処理ソフトで仕上げるとき。 \\
+High Quality JPEG & 高画質の JPEG。 & そのまま SNS などで見せるとき。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{memo}[RAW のまま合成されるとき]
+読み込んだ写真（Light・Dark・Flat・Bias）が、すべて同じカメラの RAW（ベイヤー配列）のときは、現像せずにセンサーのデータのまま合成します。
+JPEG や TIFF が混ざっているとき、X-Trans などのセンサーのときは、現像した画像で合成します。
+どちらで合成したかは、合成が終わったときのメッセージに表示されます。
+\end{memo}
+
+\begin{hint}[Lightroom で開いたとき]
+RAW (DNG) は「Adobe 標準」のプロファイルで開きます。カメラの仕上がり設定（ピクチャースタイルなど）に近づけたいときは、プロファイルの一覧から選び直してください。
+\end{hint}
+
+\subsection{レンズプロファイル}
+
+\begin{itemize}[itemsep=0.3ex]
+  \item 基準画像の撮影情報から、カメラ・レンズ・焦点距離・F値・ISO・露出時間を表示します。
+  \item \ui{DNGにレンズプロファイルを埋め込む}：チェックを入れると、DNG にレンズの情報を入れます。Lightroom などで開いたときに、レンズの補正（歪み・周辺減光）が自動で使われます。DNG で書き出すときだけ使われます。
+  \item \ui{手動レンズ名}：撮影情報にレンズ名が入っていない（マニュアルレンズなど）ときは、ここにレンズ名を入れると DNG に書き込みます。
+\end{itemize}

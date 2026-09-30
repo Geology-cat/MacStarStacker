@@ -8,6 +8,8 @@ macOS 14 (Sonoma) 以降に対応しています（macOS 15.7でビルド・検�
 
 > macOS 10.13 (High Sierra) 以降に対応した版は `macos10.13` ブランチで開発しています。
 
+📘 **使い方ガイド**: [`docs/MacStarStacker使い方ガイド.pdf`](docs/MacStarStacker使い方ガイド.pdf)（画面の写真付きで、はじめての方向けに説明しています。配布DMGにも同梱）
+
 ---
 
 ## 🌟 主な機能
@@ -69,10 +71,13 @@ MacStarStacker/
 ├── dist/                              # 配布用バイナリ成果物 (.app, .dmg)
 │   ├── MacStarStacker.app
 │   └── MacStarStacker.dmg
-├── docs/                              # ドキュメント（作り直し予定）
+├── docs/
+│   ├── MacStarStacker使い方ガイド.pdf  # 使い方ガイド（docs/manual から作る）
+│   ├── manual/                        # 使い方ガイドの LaTeX ソース・スクリーンショット・build.sh
 │   └── assets/                        # アイコン・画像素材
 ├── scripts/                           # 補助スクリプト
-│   └── build_deps.sh                  # OpenCV・LibRawをUniversal静的ライブラリとしてビルド
+│   ├── build_deps.sh                  # OpenCV・LibRawをUniversal静的ライブラリとしてビルド
+│   └── かんたんインストーラ.applescript # DMGに入れるインストーラ（build_app.sh が .scpt にする）
 ├── MacStarStacker.swiftpm/            # Swift/C++ ソースコード & ビルド設定
 │   ├── Package.swift
 │   ├── build_app.sh                   # dist/ にビルド・パッケージングするスクリプト
@@ -112,6 +117,18 @@ cd MacStarStacker.swiftpm
 bash build_app.sh
 ```
 ビルドが完了すると、`dist/` 配下に `MacStarStacker.app` および `MacStarStacker.dmg` が自動生成されます。
+`docs/MacStarStacker使い方ガイド.pdf` があれば、DMGに同梱します。
+
+### 使い方ガイドの作成
+```bash
+# スクリーンショットを撮る（RAWのフォルダを指定。release で十数分かかる）
+DOC_SCREENSHOTS_DIR="$PWD/docs/manual/figures" DOC_SAMPLE_DIR=<RAWのフォルダ> \
+  swift test -c release --package-path MacStarStacker.swiftpm --filter DocumentationScreenshotTests
+# LaTeX で PDF にする（TeX Live の lualatex・latexmk が必要）
+docs/manual/build.sh
+```
+スクリーンショットはアプリの画面を部品ごとに描いて撮り、説明の矢印の位置（`figures/*.coords.tex`）も一緒に書き出します。
+インストールの章の画面（`figures/install_*`）は、Finder・スクリプトエディタ・システム設定を手で撮ったものです。
 
 ---
 

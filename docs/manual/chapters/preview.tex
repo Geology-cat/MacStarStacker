@@ -1,0 +1,37 @@
+\clearpage
+\section{プレビュー（写真の表示）}\label{sec:preview}
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}[0.82\linewidth]{canvas}
+  \calloutabove{1}{autostretch}
+  \calloutabove{2}{filename}
+  \calloutabove{3}{zoomout}
+  \calloutabove{4}{zoomin}
+  \calloutabove{5}{zoomreset}
+\end{screenshot}
+\caption{プレビュー}
+\end{figure}
+
+\begin{callouts}
+\co{1} \ui{Auto Stretch}：暗い写真を見やすい明るさにして表示します。\textbf{表示が変わるだけで、合成や書き出しの結果は変わりません。}
+\co{2} いま表示している写真の名前です。合成した結果を表示しているときは「スタック結果」と表示されます。
+\co{3} \ui{−}：表示を縮小します。
+\co{4} \ui{＋}：表示を拡大します（最大 1000\%）。
+\co{5} \ui{1:1}：拡大・移動をやめて、写真全体が入る大きさに戻します。
+\end{callouts}
+
+\subsection{マウスとトラックパッドの操作}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{l X}
+\toprule
+したいこと & 操作 \\
+\midrule
+拡大・縮小 & トラックパッドでピンチ（2本の指を広げる・つまむ）、または\key{⌘}キーを押しながらスクロール \\
+拡大した写真を動かす & 写真をつかんでドラッグ \\
+ブラシで塗っているときに写真を動かす & \key{space}キーまたは\key{option}キーを押しながらドラッグ \\
+\bottomrule
+\end{tabularx}
+\end{center}

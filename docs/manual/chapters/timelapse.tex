@@ -1,0 +1,47 @@
+\clearpage
+\section{タイムラプス動画を作る（設定の\ui{タイムラプス}タブ）}\label{sec:timelapse}
+
+ファイルリストの Light の写真を順番につないで、動画（MP4）にします。設定の上のタブで\ui{タイムラプス}を選びます。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}[0.46\linewidth]{settings_timelapse}
+  \calloutright{1}{range}
+  \calloutright{2}{speed}
+  \calloutleft{3}{align}
+  \calloutleft{4}{deflicker}
+  \calloutleft{5}{autostretch}
+  \calloutleft{6}{resolution}
+  \calloutleft{7}{codec}
+  \calloutleft{8}{write}
+\end{screenshot}
+\caption{設定の\ui{タイムラプス}タブ}
+\end{figure}
+
+\begin{callouts}
+\co{1} \textbf{フレーム範囲}：動画に使う写真の範囲（開始フレーム・終了フレーム）を選びます。下に、使う枚数と、できる動画のおよその長さが表示されます。
+\co{2} \textbf{再生速度}：\ui{FPS指定}（1秒に何枚の写真を見せるか、1〜120）か、\ui{秒数指定}（動画の長さ）を選び、数を入れて\key{return}キーで決めます。最初は 24 fps です。
+\co{3} \textbf{位置合わせ}：\ui{位置合わせなし}・\ui{地上に合わせる（揺れ補正）}・\ui{星に合わせる（星を固定）}から選びます。
+\co{4} \ui{フリッカー除去（輝度均一化）}：写真ごとの明るさのばらつき（ちらつき）をそろえます。
+\co{5} \ui{オートストレッチ}：暗い写真を見やすい明るさにしてから動画にします。
+\co{6} \textbf{解像度}：\ui{オリジナル}・\ui{4K}・\ui{1080p}・\ui{720p}から選びます。
+\co{7} \textbf{コーデック}：\ui{H.264}か\ui{H.265/HEVC}を選びます。HEVC はファイルが小さくなりますが、古い機器では再生できないことがあります。
+\co{8} \ui{タイムラプス書き出し}：保存する場所を選んで、動画を書き出します。
+\end{callouts}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{l X}
+\toprule
+位置合わせ & こんなときに \\
+\midrule
+位置合わせなし & 三脚でしっかり固定して撮ったとき。 \\
+地上に合わせる（揺れ補正） & 風で三脚がゆれた、追尾撮影で地上が動いたなど、地上を止めたいとき（星は動きます）。 \\
+星に合わせる（星を固定） & 星空を止めて、地上が回っていくように見せたいとき。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{memo}[macOS10.13 版]
+\textsf{macOS10.13} 版では、HEVC（H.265）は、HEVC のハードウェアエンコーダーがある Mac でだけ選べます。
+\end{memo}

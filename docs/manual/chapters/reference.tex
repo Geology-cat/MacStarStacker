@@ -1,0 +1,42 @@
+\clearpage
+\section{設定項目の一覧}\label{sec:reference}
+
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} X}
+\toprule
+項目 & 最初の値 & 説明 \\
+\midrule
+\multicolumn{3}{l}{\textbf{スタック方式}} \\
+スタック方式 & 平均 & 平均・中央値・比較明合成（\ref{sec:stacking}節）。 \\
+アライメント & 平均・中央値：ON／比較明：OFF & 星の位置を合わせてから重ねます。新星景モードでは常に使います。 \\
+シグマクリッピング & OFF & 平均のときだけ。外れ値を除いてから平均します。 \\
+κ 下側・上側 & 3.0・3.0 & 1〜10。小さいほど多くの値を外れ値として除きます。新星景モードでも使います。 \\
+光跡を除去 & OFF & 比較明合成のときだけ。飛行機・人工衛星の光跡を取り除きます。 \\
+\midrule
+\multicolumn{3}{l}{\textbf{空と地上（新星景モード）}} \\
+新星景モード & OFF & 平均・中央値のとき。空と地上を分けて合成します。 \\
+空と地上を分けて合成 & OFF & 比較明合成のとき。ブラシで塗った地上を平均で合成します。 \\
+ブラシ & 空（青）、20 px & 空（青）・地上（緑）・消しゴム、大きさ 5〜150 px。 \\
+境界ぼかし & 新星景：0 px／比較明：12 px & 新星景 0〜300 px、比較明 0〜100 px。 \\
+地上固定フレーム & なし & 地上だけを撮った写真。地上はこの写真にします。 \\
+\midrule
+\multicolumn{3}{l}{\textbf{レンズプロファイル・書き出し}} \\
+DNGにレンズプロファイルを埋め込む & ON & DNG で書き出すときにレンズの情報を入れます。 \\
+手動レンズ名 & 空欄 & 撮影情報にレンズ名が無いときに入れます。 \\
+書き出し形式 & RAW (DNG) & RAW (DNG)・16bit TIFF・32bit FITS・High Quality JPEG。 \\
+\midrule
+\multicolumn{3}{l}{\textbf{プレビュー}} \\
+Auto Stretch & OFF & 表示だけを明るくします（結果は変わりません）。 \\
+\midrule
+\multicolumn{3}{l}{\textbf{タイムラプス}} \\
+フレーム範囲 & 全部 & 動画に使う写真の範囲。 \\
+再生速度 & 24 fps & FPS（1〜120）か、動画の秒数で指定。 \\
+位置合わせ & 位置合わせなし & なし・地上に合わせる・星に合わせる。 \\
+フリッカー除去 & OFF & 写真ごとの明るさをそろえます。 \\
+オートストレッチ & OFF & 暗い写真を明るくしてから動画にします。 \\
+解像度 & オリジナル & オリジナル・4K・1080p・720p。 \\
+コーデック & H.264 & H.264・H.265/HEVC。 \\
+\bottomrule
+\end{tabularx}
+\normalsize

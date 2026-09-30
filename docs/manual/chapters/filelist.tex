@@ -1,0 +1,61 @@
+\clearpage
+\section{ファイルリスト（写真の読み込みと管理）}\label{sec:filelist}
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}[0.36\linewidth]{filelist}
+  \calloutright{1}{reset}
+  \calloutleft{2}{base}
+  \calloutleft{3}{types}
+  \calloutleft{4}{add}
+  \calloutright{5}{clear}
+  \calloutleft{6}{star}
+  \calloutright{7}{remove}
+  \calloutleft{8}{unstar}
+\end{screenshot}
+\caption{ファイルリスト}
+\end{figure}
+
+\begin{callouts}
+\co{1} \ui{すべてクリア}：読み込んだ写真・合成の結果・マスク・設定をすべて消して、起動した直後の状態に戻します。確認のメッセージが出ます。取り消せないので注意してください。
+\co{2} \textbf{基準画像}：いまの基準画像の名前と撮影情報です。
+\co{3} \textbf{種類の切り替え}：\ui{Light}・\ui{Dark}・\ui{Flat}・\ui{Bias}を切り替えます。かっこの中は読み込んだ枚数です。\ui{＋ 追加}やドラッグ＆ドロップで読み込むと、いま選んでいる種類に入ります。
+\co{4} \ui{＋ 追加}：写真を選んで、いま選んでいる種類に読み込みます。
+\co{5} \ui{リストをクリア}：いま選んでいる種類（Light なら Light だけ）の写真をすべて外します。
+\co{6} 黄色の\ui{★}が基準画像です。いま表示している写真は、左に青い帯が付き、名前が太字になります。
+\co{7} \ui{×}：その写真をリストから外します（ファイルそのものは消えません）。
+\co{8} \ui{☆}：押すと、その写真が基準画像になります。
+\end{callouts}
+
+写真の名前の下には、撮影に使ったレンズや、焦点距離・F値・ISO・露出時間が表示されます。
+写真の行をクリックすると、その写真がプレビューに表示されます。
+
+\begin{memo}[取り消し]
+写真を追加したり外したりした操作は、\menu{編集 → 取り消す}（\key{⌘}\,\key{Z}）で1つずつ戻せます。
+\end{memo}
+
+\subsection{Dark・Flat・Bias（補正用の写真）}\label{sec:calibration}
+
+Dark・Flat・Bias は、センサーやレンズのくせを取り除くための写真です（\pageref{sec:requirements}ページの表も見てください）。
+なくても合成できます。使う場合は、種類を切り替えてから\ui{＋ 追加}で読み込むだけで、合成のときに自動で補正します。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{l X X}
+\toprule
+種類 & 撮り方 & 取り除けるもの \\
+\midrule
+Dark & レンズキャップをして、Light と同じ露出時間・ISO で、できれば同じ気温のときに数枚〜十数枚 & 熱によるノイズ、ホットピクセル（明るい点）、アンプグロー（画面の端の明るいかぶり） \\
+Flat & Light と同じレンズ・F値・ピントで、明るさが均一な面を数枚 & 周辺減光（四隅が暗くなる）、センサーのごみの影 \\
+Bias & レンズキャップをして、いちばん短い露出時間・Light と同じ ISO で数枚〜十数枚 & センサーの基準の明るさのむら \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{hint}
+何枚か読み込むと、自動で1枚にまとめて（中央値）から使います。Dark を読み込んだ場合は、Bias はなくてもかまいません。
+\end{hint}
+
+\subsection{地上固定フレームの欄}
+
+新星景モードで「地上固定フレーム」を登録すると、Light タブのいちばん上に\ui{地上固定フレーム}の欄ができ、登録した写真が並びます（\ref{sec:groundfixed}節）。

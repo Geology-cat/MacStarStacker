@@ -1,0 +1,87 @@
+\clearpage
+\section{まずはやってみよう（5つの手順）}\label{sec:quickstart}
+
+まずは、いちばん基本の「平均」でノイズの少ない1枚を作ってみましょう。
+同じ構図で続けて撮った星空の写真（10〜30枚くらい）を用意してください。
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.35cm,
+  box/.style={draw=accentdark,fill=accent!12,rounded corners=3pt,minimum height=1.1cm,text width=2.35cm,
+    align=center,font=\sffamily\small},
+  arr/.style={-{Stealth[length=2.4mm]},accentdark,line width=1pt}]
+  \node[box] (a) {\textbf{1} 写真を\\読み込む};
+  \node[box,right=of a] (b) {\textbf{2} 基準画像を\\選ぶ};
+  \node[box,right=of b] (c) {\textbf{3} 合成のしかたを\\選ぶ};
+  \node[box,right=of c] (d) {\textbf{4} スタッキング\\開始};
+  \node[box,right=of d] (e) {\textbf{5} 結果を\\書き出す};
+  \draw[arr] (a) -- (b); \draw[arr] (b) -- (c); \draw[arr] (c) -- (d); \draw[arr] (d) -- (e);
+\end{tikzpicture}
+\end{center}
+
+\subsection*{手順1　写真を読み込む}
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}{main_empty}
+  \markbox{add}
+  \calloutleft{1}{add}
+\end{screenshot}
+\caption{起動した直後の画面}
+\end{figure}
+
+\begin{steps}
+  \item ファイルリストの\ui{＋ 追加}を押し、合成したい写真（Light）を選びます。\key{⌘}キーや\key{shift}キーを押しながらクリックすると、何枚もまとめて選べます。フォルダを選ぶと、中の写真をまとめて読み込みます。
+  \item または、Finder から写真（またはフォルダ）をファイルリストにドラッグ＆ドロップしても読み込めます。
+\end{steps}
+
+読み込むと、ファイルリストに写真の名前が並び、プレビューに1枚目が表示されます。
+
+\subsection*{手順2　基準画像を選ぶ}
+
+最初に読み込んだ写真が、自動で基準画像（黄色の\ui{★}）になります。ほかの写真にしたいときは、その写真の\ui{☆}を押します。
+ふつうは真ん中あたりの写真を選ぶと、全体のずれが小さくなります。
+
+\subsection*{手順3　合成のしかたを選ぶ}
+
+右の設定の\ui{スタック方式}で\ui{平均 (Average)}を選び、\ui{アライメント（星の位置合わせ）}にチェックが入っていることを確かめます（最初からこの設定になっています）。
+
+\subsection*{手順4　スタッキング開始}
+
+\ui{★ スタッキング開始}を押します（\key{⌘}\,\key{R}でも始まります）。プレビューの下に進み具合が表示されます。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}{main_stacking}
+  \markbox{progress}
+  \calloutbelow{1}{progress}
+\end{screenshot}
+\caption{合成しているところ。\num{1}に進み具合が表示されます}
+\end{figure}
+
+\subsection*{手順5　結果を書き出す}
+
+合成が終わると、プレビューに結果が表示されます。\ui{書き出し \& 実行}の上の欄で形式を選び、\ui{結果を書き出す…}を押して保存します（\ref{sec:export}節）。
+迷ったら、まずは\ui{RAW (DNG)}で保存しておくと、あとで Lightroom などで明るさや色を自由に調整できます。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}{main_result_average}
+  \calloutabove{1}{toggle}
+  \calloutright[0.3]{3}{format}
+  \calloutright[-0.2]{2}{status}
+  \markbox{export}
+  \calloutright{4}{export}
+\end{screenshot}
+\caption{合成が終わったところ}
+\end{figure}
+
+\begin{callouts}
+\co{1} \ui{元画像を表示}／\ui{スタック結果を表示}：合成前の写真と結果を切り替えて見比べます。
+\co{2} 合成が終わると「スタッキング完了！」と、どのように合成したかが表示されます。
+\co{3} 書き出す形式を選びます。
+\co{4} \ui{結果を書き出す…}：保存する場所と名前を決めて保存します。
+\end{callouts}
+
+\begin{hint}[うまくいったら]
+新星景モード（\ref{sec:nightscape}節）を使うと、星だけでなく地上の風景もくっきりした1枚にできます。
+\end{hint}

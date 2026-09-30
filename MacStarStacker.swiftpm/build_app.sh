@@ -88,6 +88,14 @@ ln -s /Applications "$DMG_STAGING/Applications"
 # かんたんインストーラ（コピー・Gatekeeperの解除・初回起動を行うAppleScript）
 osacompile -o "$DMG_STAGING/かんたんインストーラ.scpt" "$PROJ_DIR/../scripts/かんたんインストーラ.applescript"
 
+# 使い方ガイド（docs/manual/build.sh で作ったPDF。無ければ入れない）
+GUIDE_PDF="$PROJ_DIR/../docs/MacStarStacker使い方ガイド.pdf"
+if [ -f "$GUIDE_PDF" ]; then
+    cp "$GUIDE_PDF" "$DMG_STAGING/"
+else
+    echo "WARNING: $GUIDE_PDF がありません（DMGに使い方ガイドを入れません）" >&2
+fi
+
 # Create README note for DMG
 cat << EOF > "$DMG_STAGING/はじめにお読みください.txt"
 MacStarStacker インストール＆初回起動ガイド
@@ -101,8 +109,13 @@ MacStarStacker インストール＆初回起動ガイド
 
 【手動でインストールする場合】
 1. 「MacStarStacker.app」を「Applications」フォルダへドラッグ＆ドロップしてください。
-2. 本ビルドはAppleのDeveloper IDでは署名・公証されていません。
-   初回起動で警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
+2. 本ビルドはAppleのDeveloper IDでは署名・公証されていません。初回起動で止められたときは:
+   ・macOS 15 以降: メッセージの「完了」を押して閉じ、システム設定 → プライバシーとセキュリティ の
+     下の方にある「このまま開く」を押してください。
+   ・macOS 14 以前: 「MacStarStacker.app」を右クリックし、「開く」を選択してください。
+
+【使い方】
+「MacStarStacker使い方ガイド.pdf」に、画面の見方から新星景モードまで、画面の写真付きで説明しています。
 
 対応OS: macOS 14 (Sonoma) 以降
 収録アーキテクチャ: Universal（Apple Silicon / Intel のどちらでもネイティブ動作）
