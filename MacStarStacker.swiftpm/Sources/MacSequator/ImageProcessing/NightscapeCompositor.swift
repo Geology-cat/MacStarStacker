@@ -4,11 +4,11 @@ import OpenCVWrapper
 
 /// 新星景モード: 空は星に、地上は地上に合わせて合成し、自動で判定した空と地上の境界で重ね合わせる。
 ///
-/// 1. 各フレームで、星に合わせる変換（StarAligner）と地上に合わせる変換（GroundAligner）を求め、
-///    空と地上の判定用の縮小画像と、外れ値を除く基準（画素ごとの中央値）用の輝度を集める
-/// 2. 空と地上を自動で判定する（塗った手がかりがあれば優先する）
-/// 3. もう一度各フレームを読み、空と地上をそれぞれ合わせて合成する
+/// 1. 解析（`analyze`）: 各フレームで、星に合わせる変換（StarAligner）と地上に合わせる変換（GroundAligner）を求め、
+///    空と地上の判定用の縮小画像と、外れ値を除く基準（画素ごとの中央値）用の輝度を集め、空と地上を自動で判定する
+/// 2. 合成（`compose(analysis:)`）: 塗った手がかりで判定し直し、もう一度各フレームを読んで空と地上をそれぞれ合わせて合成する
 ///
+/// 解析の結果は、ブラシで直してから合成し直すときに使い回せる（位置合わせと判定用のデータ集めをやり直さない）。
 /// フレームは RAW でも現像済みの画像でもよく、`loadFrame` が基準画像と同じ向き・大きさの16bit RGBを返す。
 enum NightscapeCompositor {
     struct Result {
@@ -31,9 +31,61 @@ enum NightscapeCompositor {
         var errorDescription: String? { message }
     }
 
+    /// 解析を途中で取りやめた（入力が変わった・合成を始めた）
+    struct Cancelled: Error {}
+
+    /// 解析の結果（位置合わせ・判定用のデータ・自動判定）。合成のたびに使い回す
+    final class Analysis {
+        let frameCount: Int
+        let baseIndex: Int
+        let width: Int
+        let height: Int
+        let starHomographies: [[NSNumber]]
+        let groundHomographies: [[NSNumber]]
+        let groundFallbackCount: Int
+        /// 分けて合成する必要が無い・できない理由（nil なら分けて合成できる）
+        let notNeededReason: String?
+        /// 解析したときの自動判定（空の割合、判定結果の表示用）。分けて合成しない場合は nil
+        let detectedSkyAlpha: [Float]?
+        fileprivate let analyzer: NightscapeAnalyzer?
+        fileprivate let samples: NightscapeSamples?
+        /// メモリに余裕があるときに保持する現像済みのフレーム（合成で読み直さない）。基準フレームは常に保持する
+        fileprivate private(set) var frames: [Int: [UInt16]]
+
+        /// 保持している現像済みのフレームを手放す（基準フレームだけ残す）。
+        /// ブラシで直している間など、解析を持ち続けるときのメモリを減らす
+        func releaseFrames() {
+            frames = frames.filter { $0.key == baseIndex }
+        }
+
+        fileprivate init(frameCount: Int, baseIndex: Int, width: Int, height: Int, starHomographies: [[NSNumber]],
+                         groundHomographies: [[NSNumber]], groundFallbackCount: Int, notNeededReason: String?,
+                         detectedSkyAlpha: [Float]?, analyzer: NightscapeAnalyzer?, samples: NightscapeSamples?,
+                         frames: [Int: [UInt16]]) {
+            self.frameCount = frameCount
+            self.baseIndex = baseIndex
+            self.width = width
+            self.height = height
+            self.starHomographies = starHomographies
+            self.groundHomographies = groundHomographies
+            self.groundFallbackCount = groundFallbackCount
+            self.notNeededReason = notNeededReason
+            self.detectedSkyAlpha = detectedSkyAlpha
+            self.analyzer = analyzer
+            self.samples = samples
+            self.frames = frames
+        }
+
+        /// 基準画像から外側へ順に処理する順番（隣のフレームの結果を初期値にする）
+        fileprivate var order: [Int] {
+            [baseIndex] + Array((baseIndex + 1)..<frameCount) + Array((0..<baseIndex).reversed())
+        }
+    }
+
     /// 星と地上の動きの差がこれ未満（px）なら、分けて合成する必要が無い
     static let minimumRelativeShift = 2.0
 
+    /// 解析と合成を続けて行う
     static func compose(
         frameCount: Int,
         baseIndex: Int,
@@ -45,12 +97,34 @@ enum NightscapeCompositor {
         loadFrame: (Int) throws -> [UInt16],
         progress: (Double, String) -> Void
     ) throws -> Outcome {
-        guard frameCount >= 2 else { return .notNeeded("フレームが1枚のため、空と地上を分けずに合成しました") }
-        let identity: [NSNumber] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        let analysis = try analyze(frameCount: frameCount, baseIndex: baseIndex, width: width, height: height,
+                                   hints: nil, cacheFrames: cacheFrames, loadFrame: loadFrame,
+                                   progress: { fraction, status in progress(fraction * 0.5, status) })
+        return try compose(analysis: analysis, hints: hints, featherRadius: featherRadius, loadFrame: loadFrame,
+                           progress: { fraction, status in progress(0.5 + fraction * 0.5, status) })
+    }
 
-        // 1. 位置合わせと判定用のデータ集め（基準フレームから外側へ順に、隣のフレームの結果を初期値にする）
-        progress(0.05, "新星景モード: 基準画像を解析中...")
+    /// 解析: 全フレームを星と地上にそれぞれ位置合わせし、空と地上を自動で判定する（hints は利用者のブラシの手がかり）
+    static func analyze(
+        frameCount: Int,
+        baseIndex: Int,
+        width: Int,
+        height: Int,
+        hints: Data?,
+        cacheFrames: Bool = false,
+        isCancelled: () -> Bool = { false },
+        loadFrame: (Int) throws -> [UInt16],
+        progress: (Double, String) -> Void
+    ) throws -> Analysis {
+        let identity: [NSNumber] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        progress(0.02, "新星景モード: 基準画像を解析中...")
         let base = try loadFrame(baseIndex)
+        guard frameCount >= 2 else {
+            return Analysis(frameCount: frameCount, baseIndex: baseIndex, width: width, height: height,
+                            starHomographies: [identity], groundHomographies: [identity], groundFallbackCount: 0,
+                            notNeededReason: "フレームが1枚のため、空と地上を分けずに合成しました", detectedSkyAlpha: nil,
+                            analyzer: nil, samples: nil, frames: [baseIndex: base])
+        }
         let baseGray = gray(of: base, count: width * height)
         let starAligner: StarAligner
         do {
@@ -66,14 +140,14 @@ enum NightscapeCompositor {
         var starH = [[NSNumber]](repeating: identity, count: frameCount)
         var groundH = [[NSNumber]](repeating: identity, count: frameCount)
         var groundFallbackCount = groundAligner == nil ? frameCount - 1 : 0
-        // cacheFrames なら、合成のときに読み直さないよう読み込んだフレームを保持する
-        var cache: [Int: [UInt16]] = [:]
+        var frames: [Int: [UInt16]] = [baseIndex: base]
         let order = [baseIndex] + Array((baseIndex + 1)..<frameCount) + Array((0..<baseIndex).reversed())
         for (step, index) in order.enumerated() {
-            progress(0.05 + 0.4 * Double(step) / Double(frameCount),
+            if isCancelled() { throw Cancelled() }
+            progress(0.02 + 0.88 * Double(step) / Double(frameCount),
                      "新星景モード: 星と地上の位置合わせ・判定用の解析中 (\(step + 1)/\(frameCount))...")
             let rgb = index == baseIndex ? base : try loadFrame(index)
-            if cacheFrames && index != baseIndex { cache[index] = rgb }
+            if cacheFrames && index != baseIndex { frames[index] = rgb }
             let frameGray = index == baseIndex ? baseGray : gray(of: rgb, count: width * height)
             if index != baseIndex {
                 let neighbor = index > baseIndex ? index - 1 : index + 1
@@ -96,12 +170,38 @@ enum NightscapeCompositor {
             try samples.addFrameGray(frameGray, starHomography: starH[index], groundHomography: groundH[index])
         }
 
+        var reason: String?
+        var detectedSkyAlpha: [Float]?
         if analyzer.maximumRelativeShift < minimumRelativeShift {
-            return .notNeeded("星と地上の動きの差が小さいため（最大\(String(format: "%.1f", analyzer.maximumRelativeShift))px）、空と地上を分けずに合成しました")
+            reason = "星と地上の動きの差が小さいため（最大\(String(format: "%.1f", analyzer.maximumRelativeShift))px）、空と地上を分けずに合成しました"
+        } else {
+            progress(0.92, "新星景モード: 空と地上を判定中...")
+            let detected = try analyzer.segment(withHints: hints)
+            if detected.hasBothRegions {
+                detectedSkyAlpha = detected.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            } else {
+                reason = "空と地上をはっきり見分けられなかったため、空と地上を分けずに合成しました"
+            }
         }
+        return Analysis(frameCount: frameCount, baseIndex: baseIndex, width: width, height: height,
+                        starHomographies: starH, groundHomographies: groundH, groundFallbackCount: groundFallbackCount,
+                        notNeededReason: reason, detectedSkyAlpha: detectedSkyAlpha, analyzer: analyzer, samples: samples,
+                        frames: frames)
+    }
 
-        // 2. 空と地上の判定
-        progress(0.47, "新星景モード: 空と地上を判定中...")
+    /// 合成: 解析の結果を使い、塗った手がかりで空と地上を判定し直して合成する
+    static func compose(
+        analysis: Analysis,
+        hints: Data?,
+        featherRadius: Double = 0,
+        loadFrame: (Int) throws -> [UInt16],
+        progress: (Double, String) -> Void
+    ) throws -> Outcome {
+        if let reason = analysis.notNeededReason { return .notNeeded(reason) }
+        guard let analyzer = analysis.analyzer, let samples = analysis.samples else {
+            return .notNeeded("空と地上を分けずに合成しました")
+        }
+        progress(0.02, "新星景モード: 空と地上を判定中...")
         let detected = try analyzer.segment(withHints: hints)
         guard detected.hasBothRegions else {
             return .notNeeded("空と地上をはっきり見分けられなかったため、空と地上を分けずに合成しました")
@@ -109,19 +209,22 @@ enum NightscapeCompositor {
         // 境界ぼかし（px）を指定したときは、自動で決めた境界をさらにぼかして重ね合わせる
         let mask = featherRadius > 0 ? detected.feathered(radius: featherRadius) : detected
 
-        // 3. 合成（もう一度各フレームを読む）
         let accumulator = NightscapeAccumulator(mask: mask, samples: samples)
-        for (step, index) in order.enumerated() {
-            progress(0.5 + 0.4 * Double(step) / Double(frameCount), "新星景モード: 空と地上を合成中 (\(step + 1)/\(frameCount))...")
-            let rgb = index == baseIndex ? base : try cache.removeValue(forKey: index) ?? loadFrame(index)
+        let count = analysis.frameCount
+        for (step, index) in analysis.order.enumerated() {
+            progress(0.1 + 0.8 * Double(step) / Double(count), "新星景モード: 空と地上を合成中 (\(step + 1)/\(count))...")
+            let rgb = try analysis.frames[index] ?? loadFrame(index)
             try accumulator.addFrameRGB(rgb.withUnsafeBufferPointer { Data(buffer: $0) },
-                                        starHomography: starH[index], groundHomography: groundH[index])
+                                        starHomography: analysis.starHomographies[index],
+                                        groundHomography: analysis.groundHomographies[index])
         }
-        progress(0.9, "新星景モード: 仕上げ中...")
+        progress(0.92, "新星景モード: 仕上げ中...")
+        // 解析は合成し直すときのために持ち続けるので、保持していたフレームは手放す
+        analysis.releaseFrames()
         let output = try accumulator.compose()
         let pixels: [UInt16] = output.withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
         let skyAlpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        return .composited(Result(pixels: pixels, skyAlpha: skyAlpha, groundFallbackCount: groundFallbackCount))
+        return .composited(Result(pixels: pixels, skyAlpha: skyAlpha, groundFallbackCount: analysis.groundFallbackCount))
     }
 
     /// 16bit RGB の輝度（R・G・Bの平均、float32）
@@ -161,6 +264,79 @@ enum NightscapeCompositor {
             else if green > blue + margin { hints[i] = byUser ? 2 : 4; painted = true }
         }
         return painted ? Data(hints) : nil
+    }
+
+    /// マスクのうち、ブラシで塗った所（不透明）だけを残す（前回の自動判定の結果は除く）。何も残らなければ nil
+    static func userStrokesOnly(_ mask: NSImage?) -> NSImage? {
+        guard let mask, let cg = mask.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let width = cg.width, height = cg.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        let userAlpha = UInt8(Int(detectedOverlayAlpha) + 3)
+        var kept = false
+        for i in 0..<(width * height) {
+            if bytes[i * 4 + 3] >= userAlpha { kept = true } else { for c in 0..<4 { bytes[i * 4 + c] = 0 } }
+        }
+        guard kept, let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return nil }
+        return NSImage(cgImage: image, size: mask.size)
+    }
+
+    /// 手がかりのうち、利用者のブラシ（1・2）だけを残す（前回の自動判定の結果 3・4 は除く）
+    static func userHints(_ hints: Data) -> Data? {
+        var painted = false
+        let user = Data(hints.map { value -> UInt8 in
+            guard value == 1 || value == 2 else { return 0 }
+            painted = true
+            return value
+        })
+        return painted ? user : nil
+    }
+
+    /// 自動判定の結果のマスク（overlay）に、これまでのマスクのブラシで塗った所（不透明）を重ねる。
+    /// 判定し直してもブラシで直した所が消えないようにする
+    static func mergingUserStrokes(from previous: NSImage?, onto overlay: NSImage) -> NSImage {
+        guard let previous,
+              let previousCG = previous.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let overlayCG = overlay.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return overlay }
+        let width = overlayCG.width, height = overlayCG.height
+        func render(_ image: CGImage) -> [UInt8]? {
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                              bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                context.interpolationQuality = .none
+                context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+            return drawn ? bytes : nil
+        }
+        guard var merged = render(overlayCG), let strokes = render(previousCG) else { return overlay }
+        let userAlpha = UInt8(Int(detectedOverlayAlpha) + 3)
+        var changed = false
+        for i in 0..<(width * height) where strokes[i * 4 + 3] >= userAlpha {
+            for c in 0..<4 { merged[i * 4 + c] = strokes[i * 4 + c] }
+            changed = true
+        }
+        guard changed, let provider = CGDataProvider(data: Data(merged) as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { return overlay }
+        return NSImage(cgImage: image, size: overlay.size)
     }
 
     /// マスク画像を width x height のRGBA 8bit（アルファ乗算済み、上の行から）に描いて手がかりにする

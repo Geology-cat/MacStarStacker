@@ -400,6 +400,15 @@ final class NightscapeTests: XCTestCase {
         XCTAssertGreaterThan(Double(ground) / Double(repainted), 0.9, "塗り直した所が地上になる（\(ground)/\(repainted)）")
     }
 
+    func testSegmentationIsRepeatable() throws {
+        // 同じ解析から何度判定しても同じ結果になる（解析を使い回して合成し直すときに結果が変わらない）
+        let analyzer = try analyzedFixedScene()
+        let first = try analyzer.segment(withHints: nil).skyAlpha
+        _ = try analyzer.segment(withHints: nil)
+        let again = try analyzer.segment(withHints: nil).skyAlpha
+        XCTAssertEqual(first, again)
+    }
+
     func testAutomaticSegmentationMatchesTheScene() throws {
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let starStep = (2.0, 3.0)

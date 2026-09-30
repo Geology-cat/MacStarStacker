@@ -14,6 +14,8 @@ const int kAnalysisMaxSide = 1000;
 const int kGuideMaxSide = 3000;
 /// 判定用の画像から細かな構造（星や模様）を取り出すときに除く、なだらかな明るさのぼかしの大きさ（判定用の解像度のpx）
 const double kDetailSigma = 2.0;
+/// GrabCut の乱数の種（同じ入力なら毎回同じ判定にする）
+const uint64_t kGrabCutSeed = 0x4E6967687473ULL;
 /// 塗った手がかりの縁の幅（判定用の画像の長辺に対する割合）。縁は「おそらくその側」として本当の境界に吸い付かせる
 const double kHintRimFraction = 0.02;
 /// 空の手がかり（動く星）からこの距離（判定用の画像の長辺に対する割合）より離れた画素は、初めは地上寄りとみなす
@@ -207,6 +209,8 @@ cv::Mat RefineBoundaryInTiles(const cv::Mat &guide01, const cv::Mat &binarySky, 
             // 区画に空と地上の両方が無いと色の分布を学べない
             if (cv::countNonZero(sky) == 0 || cv::countNonZero(sky) == (int)sky.total()) continue;
             cv::Mat backgroundModel, foregroundModel;
+            // GrabCut の色の分布の初期化は乱数を使うため、毎回同じ結果になるよう種を固定する
+            cv::theRNG().state = kGrabCutSeed + (uint64_t)t;
             cv::grabCut(image(outer), mask, cv::Rect(), backgroundModel, foregroundModel, 3, cv::GC_INIT_WITH_MASK);
             const cv::Mat result = (mask == cv::GC_FGD) | (mask == cv::GC_PR_FGD);
             result(cv::Rect(inner.x - outer.x, inner.y - outer.y, inner.width, inner.height)).copyTo(refined(inner));
@@ -543,6 +547,8 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
         grabMask.setTo(cv::GC_FGD, seedSky);
         grabMask.setTo(cv::GC_BGD, seedGround);
         cv::Mat backgroundModel, foregroundModel;
+        // GrabCut の色の分布の初期化は乱数を使うため、毎回同じ結果になるよう種を固定する
+        cv::theRNG().state = kGrabCutSeed;
         cv::grabCut(colorImage, grabMask, cv::Rect(), backgroundModel, foregroundModel, 5, cv::GC_INIT_WITH_MASK);
         binarySky = (grabMask == cv::GC_FGD) | (grabMask == cv::GC_PR_FGD);
         RemoveSmallIslands(binarySky, 0.001);

@@ -26,8 +26,15 @@ final class NightscapeSampleTests: XCTestCase {
             lights: lights, baseIndex: baseIndex, darks: [], flats: [], biases: [], mode: .average, align: true,
             skyGroundMask: hints, maskFeatherRadius: 0, trailMasks: [:], nightscape: true
         )
+        // NIGHTSCAPE_PREPARE を指定すると、アプリと同じく先に解析し、その結果を使い回して合成する
+        var prepared: RawStackPipeline.NightscapePreparation?
+        if environment["NIGHTSCAPE_PREPARE"] != nil {
+            let prepareStart = Date()
+            prepared = try RawStackPipeline.prepareNightscape(input) { _, _ in }
+            print("解析時間: \(Date().timeIntervalSince(prepareStart))秒")
+        }
         let start = Date()
-        let result = try XCTUnwrap(RawStackPipeline.stack(input) { fraction, status in
+        let result = try XCTUnwrap(RawStackPipeline.stack(input, nightscape: prepared) { fraction, status in
             print(String(format: "[%5.1fs %3.0f%%] %@", Date().timeIntervalSince(start), fraction * 100, status))
         })
         print("合成時間: \(Date().timeIntervalSince(start))秒 補足: \(result.note ?? "なし")")

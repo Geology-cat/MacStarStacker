@@ -21,6 +21,7 @@ class StackingStateController {
     var baseImage: ImageFile? {
         didSet {
             updateBaseImageMetadata()
+            if oldValue?.id != baseImage?.id { scheduleNightscapeAnalysis() }
             notifyStateChanged()
         }
     }
@@ -46,11 +47,23 @@ class StackingStateController {
             if stackMode == "Compare Bright" { enableCompareBrightAlignment = newValue } else { enableAlignment = newValue }
         }
     }
-    var stackMode: String = "Average" { didSet { if oldValue != stackMode { notifyStateChanged() } } } // "Average", "Median", "Compare Bright"
+    var stackMode: String = "Average" { // "Average", "Median", "Compare Bright"
+        didSet {
+            guard oldValue != stackMode else { return }
+            scheduleNightscapeAnalysis()
+            notifyStateChanged()
+        }
+    }
     /// ON のときだけ空・地上マスクの編集と分離合成を有効にする。
     /// 平均・中央値では新星景モード（空と地上を自動で判定し、塗った所は手がかりにする）、
     /// 比較明では塗ったマスクで空（比較明）と地上（平均）を分ける。
-    var enableSkyGroundMask: Bool = false { didSet { if oldValue != enableSkyGroundMask { notifyStateChanged() } } }
+    var enableSkyGroundMask: Bool = false {
+        didSet {
+            guard oldValue != enableSkyGroundMask else { return }
+            scheduleNightscapeAnalysis()
+            notifyStateChanged()
+        }
+    }
     /// 新星景モード（空は星に、地上は地上に合わせて合成）が有効か
     var isNightscapeActive: Bool { enableSkyGroundMask && stackMode != "Compare Bright" }
     var maskBitmap: NSImage? = nil { didSet { notifyStateChanged() } }
@@ -98,6 +111,38 @@ class StackingStateController {
     var trailAnalysisStatus: String = "" { didSet { if oldValue != trailAnalysisStatus { notifyStateChanged() } } }
     private var trailAnalysisGeneration: UInt64 = 0
 
+    // ── 新星景モードの解析（合成の前に空と地上を自動で判定し、ブラシで直せるようにする）──
+    var isAnalyzingNightscape: Bool = false { didSet { if oldValue != isAnalyzingNightscape { notifyStateChanged() } } }
+    var nightscapeAnalysisProgress: Double = 0.0 {
+        didSet { if oldValue != nightscapeAnalysisProgress { notifyStateChanged() } }
+    }
+    var nightscapeAnalysisStatus: String = "" { didSet { if oldValue != nightscapeAnalysisStatus { notifyStateChanged() } } }
+    /// 解析の結果。同じ入力（Light・基準画像・キャリブレーション）で合成するときに使い回す
+    enum NightscapePrepared {
+        case raw(RawStackPipeline.NightscapePreparation)
+        case developed(key: String, analysis: NightscapeCompositor.Analysis)
+
+        var key: String {
+            switch self {
+            case .raw(let preparation): return preparation.key
+            case .developed(let key, _): return key
+            }
+        }
+    }
+    private(set) var nightscapePrepared: NightscapePrepared?
+    private var nightscapeAnalysisWork: DispatchWorkItem?
+    private var nightscapeAnalysisToken: CancellationToken?
+    /// 実行中の解析の入力の組み合わせ（同じ入力の解析を途中からやり直さない）
+    private var nightscapeAnalysisKey: String?
+
+    /// 別スレッドの処理を取りやめるための印
+    final class CancellationToken {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    }
+
     // ── コールバック ──
     var onRequestShowTrailReview: (([DetectedTrailItem]) -> Void)? = nil
 
@@ -129,6 +174,7 @@ class StackingStateController {
         previewImage = last.previewImage
         invalidateTrailAnalysis()
         normalizeTimelapseRange()
+        scheduleNightscapeAnalysis()
         notifyStateChanged()
     }
 
@@ -180,6 +226,7 @@ class StackingStateController {
             invalidateTrailAnalysis()
             normalizeTimelapseRange()
         }
+        scheduleNightscapeAnalysis()
         notifyStateChanged()
 
         // バックグラウンドでメタデータを解析
@@ -231,6 +278,7 @@ class StackingStateController {
         }
         if previewImage?.id == file.id { previewImage = images[type]?.first }
         if baseImage?.id == file.id   { baseImage = images[.light]?.first }
+        scheduleNightscapeAnalysis()
         notifyStateChanged()
     }
 
@@ -244,11 +292,195 @@ class StackingStateController {
             normalizeTimelapseRange()
         }
         if removedPreview { previewImage = images[.light]?.first }
+        scheduleNightscapeAnalysis()
         notifyStateChanged()
     }
 
     /// スタッキング・光跡解析・タイムラプス書き出しの実行中はリセットできない。
     var canResetAll: Bool { !isStacking && !isAnalyzingTrails && !isExportingTimelapse }
+
+    // MARK: - 新星景モードの解析
+
+    /// 解析を使い回せるかの判定に使う、今の入力の組み合わせ
+    private func currentNightscapeKey() -> String? {
+        guard let input = nightscapeInput(mask: nil) else { return nil }
+        return RawStackPipeline.nightscapeKey(for: input)
+    }
+
+    private func nightscapeInput(mask: NSImage?) -> RawStackPipeline.Input? {
+        let lightFiles = images[.light] ?? []
+        guard let base = baseImage, !lightFiles.isEmpty else { return nil }
+        return RawStackPipeline.Input(
+            lights: lightFiles.map(\.url),
+            baseIndex: lightFiles.firstIndex(where: { $0.id == base.id }) ?? 0,
+            darks: (images[.dark] ?? []).map(\.url),
+            flats: (images[.flat] ?? []).map(\.url),
+            biases: (images[.bias] ?? []).map(\.url),
+            mode: stackMode == "Median" ? .median : .average,
+            align: true, skyGroundMask: mask, maskFeatherRadius: 0, trailMasks: [:],
+            nightscape: true, nightscapeFeatherRadius: nightscapeFeatherRadius
+        )
+    }
+
+    /// 新星景モードで入力が変わったら、少し待ってから解析する（続けて変えたときに何度も解析しない）
+    func scheduleNightscapeAnalysis() {
+        nightscapeAnalysisWork?.cancel()
+        guard isNightscapeActive else {
+            cancelNightscapeAnalysis()
+            return
+        }
+        // 入力が変わったら、前の解析と自動判定の結果（位置がずれている）はすぐに手放す（ブラシで塗った所は残す）
+        if let prepared = nightscapePrepared, prepared.key != currentNightscapeKey() {
+            nightscapePrepared = nil
+            maskBitmap = NightscapeCompositor.userStrokesOnly(maskBitmap)
+        }
+        let work = DispatchWorkItem { [weak self] in self?.analyzeNightscapeIfNeeded() }
+        nightscapeAnalysisWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private func analyzeNightscapeIfNeeded() {
+        guard let key = currentNightscapeKey(), nightscapePrepared?.key != key else { return }
+        // 同じ入力の解析が実行中なら、そのまま続ける
+        if isAnalyzingNightscape && nightscapeAnalysisKey == key { return }
+        analyzeNightscape()
+    }
+
+    private func cancelNightscapeAnalysis() {
+        nightscapeAnalysisWork?.cancel()
+        nightscapeAnalysisToken?.cancel()
+        nightscapeAnalysisToken = nil
+        nightscapeAnalysisKey = nil
+        if isAnalyzingNightscape {
+            isAnalyzingNightscape = false
+            nightscapeAnalysisStatus = ""
+        }
+    }
+
+    /// 新星景モードの解析（全フレームの位置合わせと空・地上の自動判定）を行い、判定結果をブラシで直せるマスクとして表示する。
+    /// 解析の結果は合成で使い回す
+    func analyzeNightscape() {
+        cancelNightscapeAnalysis()
+        guard isNightscapeActive, !isStacking, let base = baseImage,
+              (images[.light] ?? []).count >= 2, let input = nightscapeInput(mask: maskBitmap) else { return }
+        let token = CancellationToken()
+        nightscapeAnalysisToken = token
+        let key = RawStackPipeline.nightscapeKey(for: input)
+        nightscapeAnalysisKey = key
+        // 入力の違う前の解析は、新しい解析の前に手放す（メモリに2つ持たない）
+        if nightscapePrepared?.key != key { nightscapePrepared = nil }
+        isAnalyzingNightscape = true
+        nightscapeAnalysisProgress = 0
+        nightscapeAnalysisStatus = "新星景モード: 空と地上を自動判定しています..."
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let report: (Double, String) -> Void = { fraction, status in
+                DispatchQueue.main.async {
+                    guard let self, !token.isCancelled else { return }
+                    self.nightscapeAnalysisProgress = fraction
+                    self.nightscapeAnalysisStatus = status
+                }
+            }
+            do {
+                let prepared: NightscapePrepared
+                let overlay: NSImage?
+                let reason: String?
+                if let raw = try RawStackPipeline.prepareNightscape(input, isCancelled: { token.isCancelled }, progress: report) {
+                    prepared = .raw(raw)
+                    reason = raw.analysis.notNeededReason
+                    overlay = raw.analysis.detectedSkyAlpha.flatMap { alpha in
+                        StackingStateController.displayOrientedOverlay(
+                            NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: raw.analysis.width, height: raw.analysis.height),
+                            orientation: Int(raw.base.info.orientation))
+                    }
+                } else {
+                    let analysis = try StackingStateController.analyzeDevelopedNightscape(
+                        input, isCancelled: { token.isCancelled }, progress: report)
+                    prepared = .developed(key: key, analysis: analysis)
+                    reason = analysis.notNeededReason
+                    overlay = analysis.detectedSkyAlpha.flatMap { alpha in
+                        NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: analysis.width, height: analysis.height)
+                            .map { NSImage(cgImage: $0, size: NSSize(width: analysis.width, height: analysis.height)) }
+                    }
+                }
+                DispatchQueue.main.async {
+                    guard let self, !token.isCancelled else { return }
+                    self.nightscapeAnalysisToken = nil
+                    self.nightscapeAnalysisKey = nil
+                    self.nightscapePrepared = prepared
+                    self.isAnalyzingNightscape = false
+                    self.nightscapeAnalysisProgress = 1
+                    if let overlay {
+                        // 解析中にブラシで塗った所も残す
+                        self.maskBitmap = NightscapeCompositor.mergingUserStrokes(from: self.maskBitmap, onto: overlay)
+                        // 判定結果は基準画像の上に表示する（ブラシで直せるよう、スタック結果ではなく元画像を表示する）
+                        self.previewImage = base
+                        self.showResult = false
+                        self.nightscapeAnalysisStatus = "空と地上を自動で判定しました。違う所があればブラシで直してから、スタッキングを開始してください"
+                    } else {
+                        self.nightscapeAnalysisStatus = reason.map { "新星景モード: \($0)" } ?? ""
+                    }
+                }
+            } catch is NightscapeCompositor.Cancelled {
+                return
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self, !token.isCancelled else { return }
+                    self.nightscapeAnalysisToken = nil
+                    self.nightscapeAnalysisKey = nil
+                    self.isAnalyzingNightscape = false
+                    self.nightscapeAnalysisStatus = "新星景モード: 空と地上を判定できませんでした（\(error.localizedDescription)）"
+                }
+            }
+        }
+    }
+
+    /// 現像済み画像（JPEG・TIFFなど）での新星景モードの解析
+    private static func analyzeDevelopedNightscape(
+        _ input: RawStackPipeline.Input,
+        isCancelled: @escaping () -> Bool,
+        progress: @escaping (Double, String) -> Void
+    ) throws -> NightscapeCompositor.Analysis {
+        progress(0.02, "キャリブレーションフレームを構築中...")
+        func master(_ urls: [URL]) throws -> NSImage? {
+            guard !urls.isEmpty else { return nil }
+            let loaded = urls.compactMap { ImageLoader.load(from: $0) }
+            guard loaded.count == urls.count, let built = CalibrationProcessor.buildMaster(images: loaded) else {
+                throw NightscapeCompositor.CompositorError(message: "キャリブレーション画像を読み込めませんでした")
+            }
+            return built
+        }
+        let masterDark = try master(input.darks), masterFlat = try master(input.flats), masterBias = try master(input.biases)
+        func load(_ index: Int) throws -> NightscapeCompositor.RGB16Image {
+            let url = input.lights[index]
+            guard let image = ImageLoader.load(from: url),
+                  let calibrated = CalibrationProcessor.calibrate(light: image, masterBias: masterBias,
+                                                                  masterDark: masterDark, masterFlat: masterFlat),
+                  let rgb = NightscapeCompositor.rgb16(from: calibrated) else {
+                throw NightscapeCompositor.CompositorError(message: "画像を読み込めませんでした: \(url.lastPathComponent)")
+            }
+            return rgb
+        }
+        let baseIndex = min(max(0, input.baseIndex), input.lights.count - 1)
+        let first = try load(baseIndex)
+        let hints = input.skyGroundMask
+            .flatMap { NightscapeCompositor.hints(from: $0, width: first.width, height: first.height) }
+            .flatMap(NightscapeCompositor.userHints)
+        // ブラシで直している間も解析を持ち続けるため、現像したフレームは保持しない（メモリを抑える）
+        return try NightscapeCompositor.analyze(
+            frameCount: input.lights.count, baseIndex: baseIndex, width: first.width, height: first.height, hints: hints,
+            cacheFrames: false, isCancelled: isCancelled,
+            loadFrame: { index in
+                if index == baseIndex { return first.pixels }
+                let frame = try load(index)
+                guard frame.width == first.width, frame.height == first.height else {
+                    throw NightscapeCompositor.CompositorError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
+                }
+                return frame.pixels
+            },
+            progress: progress
+        )
+    }
 
     /// 読み込んだ画像・結果・マスク・各種設定をすべて破棄し、起動直後の状態へ戻す。
     /// Undo履歴は画像リストしか保持しておらず部分的にしか戻せないため、併せて破棄する。
@@ -266,6 +498,9 @@ class StackingStateController {
         enableCompareBrightAlignment = defaults.enableCompareBrightAlignment
         stackMode = defaults.stackMode
         enableSkyGroundMask = defaults.enableSkyGroundMask
+        cancelNightscapeAnalysis()
+        nightscapePrepared = nil
+        nightscapeAnalysisStatus = ""
         maskBitmap = nil
         brushSize = defaults.brushSize
         maskFeatherRadius = defaults.maskFeatherRadius
@@ -448,6 +683,11 @@ class StackingStateController {
             }
         }
 
+        // 解析中なら取りやめる（合成の中で必要な解析を行う）
+        cancelNightscapeAnalysis()
+        let preparedNightscape = isNightscapeActive ? nightscapePrepared : nil
+        let nightscapeKey = currentNightscapeKey()
+
         isStacking = true
         stackingProgress = 0.0
         stackingStatus = "キャリブレーションフレームを構築中..."
@@ -494,7 +734,9 @@ class StackingStateController {
             )
             var rawFallbackReason: String?
             do {
-                if let rawResult = try RawStackPipeline.stack(rawInput, progress: { fraction, status in
+                var rawPrepared: RawStackPipeline.NightscapePreparation?
+                if case .raw(let preparation)? = preparedNightscape { rawPrepared = preparation }
+                if let rawResult = try RawStackPipeline.stack(rawInput, nightscape: rawPrepared, progress: { fraction, status in
                     DispatchQueue.main.async {
                         self.stackingProgress = fraction
                         self.stackingStatus = status
@@ -508,13 +750,18 @@ class StackingStateController {
                             NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: rawResult.width, height: rawResult.height),
                             orientation: Int(rawResult.info.orientation))
                     }
+                    // 解析は状態で持つので、結果には持たせない（メモリに二重に残さない）
+                    var storedResult = rawResult
+                    storedResult.nightscape = nil
                     DispatchQueue.main.async {
                         self.stackedResult = rawResult.displayImage
-                        self.stackedRawResult = rawResult
+                        self.stackedRawResult = storedResult
                         self.stackedResultMetadata = resolvedBaseMetadata
                         self.previewImage = nil
                         self.stackingProgress = 1.0
-                        if let overlay { self.maskBitmap = overlay }
+                        if let preparation = rawResult.nightscape { self.nightscapePrepared = .raw(preparation) }
+                        // ブラシで塗った所は残し、それ以外を今回の判定結果にする
+                        if let overlay { self.maskBitmap = NightscapeCompositor.mergingUserStrokes(from: self.maskBitmap, onto: overlay) }
                         let method = rawResult.skyAlpha != nil
                             ? "新星景モード・\(rawResult.modeDescription)" : rawResult.modeDescription
                         self.stackingStatus = "✅ スタッキング完了！（\(method)で合成）"
@@ -614,26 +861,41 @@ class StackingStateController {
                         throw NightscapeCompositor.CompositorError(message: "基準画像を読み込めませんでした")
                     }
                     let hints = mask.flatMap { NightscapeCompositor.hints(from: $0, width: first.width, height: first.height) }
-                    let outcome = try NightscapeCompositor.compose(
-                        frameCount: total, baseIndex: baseIndex, width: first.width, height: first.height, hints: hints,
-                        featherRadius: Double(nightscapeFeather),
-                        loadFrame: { index in
-                            if index == baseIndex { return first.pixels }
-                            guard let frame = NightscapeCompositor.rgb16(from: calibratedFrames[index].image),
-                                  frame.width == first.width, frame.height == first.height else {
-                                throw NightscapeCompositor.CompositorError(
-                                    message: "画像サイズが一致しません: \(calibratedFrames[index].file.name)")
-                            }
-                            return frame.pixels
-                        },
-                        progress: { fraction, status in
-                            DispatchQueue.main.async {
-                                self.stackingProgress = 0.35 + fraction * 0.6
-                                self.stackingStatus = status
-                                self.notifyStateChanged()
-                            }
+                    let loadFrame: (Int) throws -> [UInt16] = { index in
+                        if index == baseIndex { return first.pixels }
+                        guard let frame = NightscapeCompositor.rgb16(from: calibratedFrames[index].image),
+                              frame.width == first.width, frame.height == first.height else {
+                            throw NightscapeCompositor.CompositorError(
+                                message: "画像サイズが一致しません: \(calibratedFrames[index].file.name)")
                         }
-                    )
+                        return frame.pixels
+                    }
+                    let report: (Double, String) -> Void = { fraction, status in
+                        DispatchQueue.main.async {
+                            self.stackingProgress = 0.35 + fraction * 0.6
+                            self.stackingStatus = status
+                            self.notifyStateChanged()
+                        }
+                    }
+                    // 同じ入力で解析済みなら使い回す（位置合わせと判定用のデータ集めをやり直さない）
+                    let analysis: NightscapeCompositor.Analysis
+                    var composeHints = hints
+                    if case .developed(let key, let prepared)? = preparedNightscape, key == nightscapeKey {
+                        analysis = prepared
+                    } else {
+                        // 前回の自動判定の結果は、その解析を使い回すときだけ手がかりにする
+                        composeHints = hints.flatMap(NightscapeCompositor.userHints)
+                        analysis = try NightscapeCompositor.analyze(
+                            frameCount: total, baseIndex: baseIndex, width: first.width, height: first.height,
+                            hints: hints.flatMap(NightscapeCompositor.userHints), loadFrame: loadFrame,
+                            progress: { fraction, status in report(fraction * 0.5, status) })
+                    }
+                    if let nightscapeKey {
+                        DispatchQueue.main.async { self.nightscapePrepared = .developed(key: nightscapeKey, analysis: analysis) }
+                    }
+                    let outcome = try NightscapeCompositor.compose(
+                        analysis: analysis, hints: composeHints, featherRadius: Double(nightscapeFeather), loadFrame: loadFrame,
+                        progress: { fraction, status in report(0.5 + fraction * 0.5, status) })
                     switch outcome {
                     case .composited(let composited):
                         nightscapeImage = NightscapeCompositor.image(from: NightscapeCompositor.RGB16Image(
@@ -752,7 +1014,9 @@ class StackingStateController {
                 self.stackedResultMetadata = resolvedBaseMetadata
                 self.previewImage = nil
                 self.stackingProgress = 1.0
-                if let nightscapeOverlay { self.maskBitmap = nightscapeOverlay }
+                if let nightscapeOverlay {
+                    self.maskBitmap = NightscapeCompositor.mergingUserStrokes(from: self.maskBitmap, onto: nightscapeOverlay)
+                }
                 var status: String
                 if let rawFallbackReason {
                     status = "✅ スタッキング完了（RAWのまま合成できなかったため現像済み画像で合成: \(rawFallbackReason)）"
