@@ -307,6 +307,24 @@ final class NightscapeTests: XCTestCase {
         XCTAssertGreaterThan(Double(glowAsSky) / Double(glowCount), 0.9, "水平線の上の光害（星が写る）は空")
     }
 
+    func testFeatheringSoftensOnlyTheBlendRatio() throws {
+        // 左半分が地上、右半分が空。10px ぼかすと境界がなだらかになるが、空・地上を合成する範囲は変わらない
+        let alpha = (0..<(width * height)).map { i -> Float in i % width < 240 ? 0 : 1 }
+        let mask = NightscapeMask(skyAlpha: alpha.withUnsafeBufferPointer { Data(buffer: $0) }, width: width, height: height)
+        let feathered = mask.feathered(radius: 10)
+        let soft: [Float] = feathered.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        let row = 160 * width
+        XCTAssertEqual(soft[row + 240], 0.52, accuracy: 0.06, "境界はほぼ半分")
+        XCTAssertEqual(soft[row + 250], 0.84, accuracy: 0.06, "標準偏差（10px）離れると約84%")
+        XCTAssertEqual(soft[row + 200], 0, accuracy: 0.01)
+        XCTAssertEqual(feathered.certainSky, mask.certainSky)
+        XCTAssertEqual(feathered.certainGround, mask.certainGround)
+        XCTAssertTrue(mask.feathered(radius: 0) === mask)
+        // 大きな半径（縮小してぼかす）でも同じ形になる
+        let wide: [Float] = mask.feathered(radius: 30).skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        XCTAssertEqual(wide[row + 270], 0.84, accuracy: 0.06)
+    }
+
     func testAutomaticSegmentationMatchesTheScene() throws {
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let starStep = (2.0, 3.0)

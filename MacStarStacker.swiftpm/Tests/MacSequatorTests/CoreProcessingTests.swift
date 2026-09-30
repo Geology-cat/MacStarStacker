@@ -227,6 +227,95 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertGreaterThan(verticallyMirroredPosition.2, verticallyMirroredPosition.1, "上下反対の位置がマスクされています")
     }
 
+    /// 画像を RGBA 8bit（アルファ乗算済み、上の行から）で読む
+    private func rgbaBytes(_ image: CGImage) -> [UInt8] {
+        let width = image.width, height = image.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { buffer in
+            let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        return bytes
+    }
+
+    func testBrushPaintsUpToImageEdgeWhenOnlyTheCircleOverlaps() throws {
+        let state = StackingStateController.shared
+        let previous = (state.maskBitmap, state.brushMode, state.brushSize)
+        defer { (state.maskBitmap, state.brushMode, state.brushSize) = previous }
+        state.maskBitmap = nil
+        state.brushMode = .ground
+        state.brushSize = 20
+
+        let canvas = MaskCanvasView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        canvas.currentImage = makeImage(width: 100, height: 100, pixel: (30, 30, 30, 255))
+        canvas.isMaskEditingEnabled = true
+        // ブラシの中心は画像の左の外（5px）だが、円（半径10px）は画像に掛かっている
+        let point = try XCTUnwrap(canvas.brushImagePoint(CGPoint(x: -5, y: 50)))
+        XCTAssertEqual(point.x, -5, accuracy: 0.001)
+        XCTAssertNil(canvas.brushImagePoint(CGPoint(x: -15, y: 50)), "円が画像に掛からなければ塗らない")
+        canvas.paint(at: point, from: point)
+        canvas.exportMaskBitmap()
+        let hints = try XCTUnwrap(NightscapeCompositor.hints(from: try XCTUnwrap(state.maskBitmap), width: 100, height: 100))
+        XCTAssertEqual(hints[50 * 100 + 0], 2, "画像の端が塗られる")
+        XCTAssertEqual(hints[50 * 100 + 3], 2)
+        XCTAssertEqual(hints[50 * 100 + 10], 0, "円の外は塗られない")
+    }
+
+    func testRepaintingDetectedMaskKeepsTheSameColor() throws {
+        let state = StackingStateController.shared
+        let previous = (state.maskBitmap, state.brushMode, state.brushSize)
+        defer { (state.maskBitmap, state.brushMode, state.brushSize) = previous }
+        // 自動判定の結果（上半分が空、下半分が地上）をマスクとして表示する
+        let alpha = (0..<(100 * 100)).map { i -> Float in i / 100 < 50 ? 1 : 0 }
+        let overlay = try XCTUnwrap(NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: 100, height: 100))
+        state.maskBitmap = NSImage(cgImage: overlay, size: NSSize(width: 100, height: 100))
+        state.brushMode = .ground
+        state.brushSize = 10
+
+        let canvas = MaskCanvasView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        canvas.currentImage = makeImage(width: 100, height: 100, pixel: (30, 30, 30, 255))
+        canvas.isMaskEditingEnabled = true
+        let point = CGPoint(x: 30, y: 80)
+        canvas.paint(at: point, from: point)
+        canvas.exportMaskBitmap()
+        let bytes = rgbaBytes(try XCTUnwrap(try XCTUnwrap(state.maskBitmap).cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        let painted = Array(bytes[(80 * 100 + 30) * 4..<(80 * 100 + 30) * 4 + 4])
+        let detected = Array(bytes[(80 * 100 + 70) * 4..<(80 * 100 + 70) * 4 + 4])
+        XCTAssertEqual(painted, detected, "自動判定で地上になった所を地上のブラシで塗っても色が変わらない")
+    }
+
+    func testMaskOverlayFadesAcrossTheFeatherRadius() throws {
+        let state = StackingStateController.shared
+        let previous = (state.maskBitmap, state.brushMode, state.brushSize)
+        defer { (state.maskBitmap, state.brushMode, state.brushSize) = previous }
+        // 左半分が地上、右半分が空
+        let alpha = (0..<(200 * 100)).map { i -> Float in i % 200 < 100 ? 0 : 1 }
+        let overlay = try XCTUnwrap(NightscapeCompositor.hintOverlay(skyAlpha: alpha, width: 200, height: 100))
+        state.maskBitmap = NSImage(cgImage: overlay, size: NSSize(width: 200, height: 100))
+
+        let canvas = MaskCanvasView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+        canvas.currentImage = makeImage(width: 200, height: 100, pixel: (30, 30, 30, 255))
+        canvas.isMaskEditingEnabled = true
+        // 地上らしさ（空の色は青が255、地上の色は青が0）
+        func groundAt(_ x: Int) throws -> Int {
+            let image = try XCTUnwrap(canvas.displayedOverlay)
+            let bytes = rgbaBytes(image)
+            let scaledX = x * image.width / 200
+            return 255 - Int(bytes[(image.height / 2 * image.width + scaledX) * 4 + 2])
+        }
+        // ぼかしなし: 地上の中はそのままの濃さ、境界の外（空）は空の色
+        XCTAssertEqual(try groundAt(60), 255)
+        XCTAssertEqual(try groundAt(115), 0)
+        // 境界ぼかし 10px: 境界を越えてなだらかに薄くなる
+        canvas.maskFeatherRadius = 10
+        XCTAssertGreaterThan(try groundAt(40), 240, "境界から離れた所は濃いまま")
+        let fading = try groundAt(110)
+        XCTAssertGreaterThan(fading, 10)
+        XCTAssertLessThan(fading, 200, "境界の外側に向かって薄くなる")
+    }
+
     func testMaskCoordinateConversionIncludesLetterboxingZoomAndPan() throws {
         let canvas = MaskCanvasView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         canvas.currentImage = makeImage(width: 100, height: 100, pixel: (30, 30, 30, 255))
@@ -346,17 +435,26 @@ final class CoreProcessingTests: XCTestCase {
         XCTAssertEqual(slider.doubleValue, 27, accuracy: 0.001)
         XCTAssertEqual(label.stringValue, "27 px")
 
-        // 新星景モード（平均・中央値）の境界は自動で滑らかになるため、境界ぼかしは比較明でだけ使う
+        // 境界ぼかしは新星景モード（平均・中央値）と比較明で別々に持つ。新星景モードの既定は 0 px
         state.enableSkyGroundMask = true
+        state.nightscapeFeatherRadius = 0
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        XCTAssertFalse(slider.isEnabled)
+        XCTAssertTrue(slider.isEnabled)
+        XCTAssertEqual(slider.doubleValue, 0, accuracy: 0.001)
+        slider.doubleValue = 6
+        XCTAssertTrue(slider.sendAction(slider.action, to: slider.target))
+        XCTAssertEqual(state.nightscapeFeatherRadius, 6, accuracy: 0.001)
+        XCTAssertEqual(state.maskFeatherRadius, 27, accuracy: 0.001, "比較明の値は変わらない")
+
         state.stackMode = "Compare Bright"
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         XCTAssertTrue(slider.isEnabled)
+        XCTAssertEqual(slider.doubleValue, 27, accuracy: 0.001)
         slider.doubleValue = 41
         XCTAssertTrue(slider.sendAction(slider.action, to: slider.target))
         XCTAssertEqual(state.maskFeatherRadius, 41, accuracy: 0.001)
         XCTAssertEqual(label.stringValue, "41 px")
+        state.nightscapeFeatherRadius = 0
     }
 
     func testDurationModeCalculatesRequestedPlaybackSpeed() {

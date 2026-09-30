@@ -83,6 +83,8 @@ enum RawStackPipeline {
         /// 新星景モード（平均・中央値）: 空は星に、地上は地上に合わせて合成し、空と地上は自動で判定する。
         /// skyGroundMask は判定の手がかり（塗った所だけ優先）として使う。比較明では使わない
         var nightscape: Bool = false
+        /// 新星景モードの境界ぼかし（px）。0 なら自動で決めた境界のまま
+        var nightscapeFeatherRadius: CGFloat = 0
 
         var usesNightscape: Bool { nightscape && mode != .compareBright }
     }
@@ -363,7 +365,7 @@ enum RawStackPipeline {
 
         let outcome = try NightscapeCompositor.compose(
             frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
-            cacheFrames: cacheFrames,
+            featherRadius: Double(input.nightscapeFeatherRadius), cacheFrames: cacheFrames,
             loadFrame: { index in
                 if index == baseIndex { return base.pixels }
                 let frame = try demosaic(index)

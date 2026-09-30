@@ -256,6 +256,7 @@ public class CanvasViewController: NSViewController {
         // 読み込み中は直前の（別の）画像を表示しているため、マスクを描けないようにする
         canvasView.isMaskEditingEnabled = state.enableSkyGroundMask
             && !state.showResult && !state.isStacking && displayImg != nil && !isPreviewLoading
+        canvasView.maskFeatherRadius = state.featherRadiusForCurrentMode
         canvasView.synchronizeMask(from: state.maskBitmap)
 
         // スタック結果トグルボタンの表示

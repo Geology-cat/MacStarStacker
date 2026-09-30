@@ -207,6 +207,7 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
 @interface NightscapeMask ()
 - (instancetype)initWithSkyAlpha:(NSData *)skyAlpha width:(NSInteger)width height:(NSInteger)height
                   hasBothRegions:(BOOL)hasBothRegions skyMargin:(int)skyMargin;
+@property (nonatomic, readwrite) NSData *skyAlpha;
 @end
 
 // ─────────────────────────────────────────────
@@ -238,6 +239,32 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     _certainGround = [NSData dataWithBytes:ground.data length:ground.total()];
     _hasBothRegions = hasBothRegions && cv::countNonZero(sky) > 0 && cv::countNonZero(ground) > 0;
     return self;
+}
+
+- (NightscapeMask *)maskByFeatheringWithRadius:(double)radius {
+    if (radius <= 0) return self;
+    const cv::Mat alpha((int)_height, (int)_width, CV_32F, (void *)_skyAlpha.bytes);
+    // 比較明の境界ぼかし（Core Image のガウスぼかし、半径＝標準偏差）と同じ強さにする。
+    // 大きくぼかすときは縮小してからぼかす（なだらかなので縮小しても変わらず、計算が軽い）
+    const double maxSigma = 8.0;
+    cv::Mat blurred;
+    if (radius <= maxSigma) {
+        cv::GaussianBlur(alpha, blurred, cv::Size(0, 0), radius, radius, cv::BORDER_REPLICATE);
+    } else {
+        const double scale = maxSigma / radius;
+        cv::Mat small;
+        cv::resize(alpha, small, cv::Size(), scale, scale, cv::INTER_AREA);
+        cv::GaussianBlur(small, small, cv::Size(0, 0), maxSigma, maxSigma, cv::BORDER_REPLICATE);
+        cv::resize(small, blurred, alpha.size(), 0, 0, cv::INTER_LINEAR);
+    }
+    if (!blurred.isContinuous()) blurred = blurred.clone();
+    // 合成に使う空・地上の範囲はぼかす前の判定のまま（ぼかしは仕上げの重ね合わせだけに効かせる）
+    NightscapeMask *feathered = [[NightscapeMask alloc] initWithSkyAlpha:_skyAlpha width:_width height:_height
+                                                          hasBothRegions:_hasBothRegions skyMargin:0];
+    feathered->_certainSky = _certainSky;
+    feathered->_certainGround = _certainGround;
+    feathered.skyAlpha = [NSData dataWithBytes:blurred.data length:blurred.total() * sizeof(float)];
+    return feathered;
 }
 
 @end

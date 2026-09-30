@@ -57,6 +57,15 @@ class StackingStateController {
     var brushSize: CGFloat = 20.0 { didSet { if oldValue != brushSize { notifyStateChanged() } } }
     /// 空と地上を合成するときの境界ぼかし半径（最終画像上のピクセル単位）。
     var maskFeatherRadius: CGFloat = 12.0 { didSet { if oldValue != maskFeatherRadius { notifyStateChanged() } } }
+    /// 新星景モードの境界ぼかし半径。境界は画像の輪郭に沿って自動でなじませるため、既定は 0（追加でぼかさない）
+    var nightscapeFeatherRadius: CGFloat = 0 {
+        didSet { if oldValue != nightscapeFeatherRadius { notifyStateChanged() } }
+    }
+    /// 現在のモード（新星景モードか比較明の分離合成か）での境界ぼかし半径
+    var featherRadiusForCurrentMode: CGFloat {
+        get { isNightscapeActive ? nightscapeFeatherRadius : maskFeatherRadius }
+        set { if isNightscapeActive { nightscapeFeatherRadius = newValue } else { maskFeatherRadius = newValue } }
+    }
     var brushMode: MaskBrush = .sky { didSet { if oldValue != brushMode { notifyStateChanged() } } }
 
     // ── レンズプロファイル設定 ──
@@ -260,6 +269,7 @@ class StackingStateController {
         maskBitmap = nil
         brushSize = defaults.brushSize
         maskFeatherRadius = defaults.maskFeatherRadius
+        nightscapeFeatherRadius = defaults.nightscapeFeatherRadius
         brushMode = defaults.brushMode
 
         embedLensProfile = defaults.embedLensProfile
@@ -455,6 +465,7 @@ class StackingStateController {
         let doAlign    = isAlignmentEnabledForCurrentMode
         let mask       = useSkyGroundMask ? maskBitmap : nil
         let maskFeather = maskFeatherRadius
+        let nightscapeFeather = nightscapeFeatherRadius
         let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
         let trailItems = self.detectedTrails
         let knownBaseMetadata = baseImageMetadata
@@ -478,7 +489,8 @@ class StackingStateController {
                     ? Dictionary(grouping: trailItems.filter(\.isMarkedForRemoval), by: \.frameIndex)
                         .mapValues { $0.compactMap(\.maskImage) }
                     : [:],
-                nightscape: nightscape
+                nightscape: nightscape,
+                nightscapeFeatherRadius: nightscapeFeather
             )
             var rawFallbackReason: String?
             do {
@@ -604,6 +616,7 @@ class StackingStateController {
                     let hints = mask.flatMap { NightscapeCompositor.hints(from: $0, width: first.width, height: first.height) }
                     let outcome = try NightscapeCompositor.compose(
                         frameCount: total, baseIndex: baseIndex, width: first.width, height: first.height, hints: hints,
+                        featherRadius: Double(nightscapeFeather),
                         loadFrame: { index in
                             if index == baseIndex { return first.pixels }
                             guard let frame = NightscapeCompositor.rgb16(from: calibratedFrames[index].image),
