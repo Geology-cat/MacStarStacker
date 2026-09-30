@@ -127,4 +127,29 @@ final class NightscapeSampleTests: XCTestCase {
             .representation(using: .png, properties: [:]))
         try png.write(to: output.appendingPathComponent("analysis_mask.png"))
     }
+
+    /// 星に合わせた平均（新星景モードではない）を、シグマクリッピングあり・なしで合成して書き出す
+    func testAverageSampleFolder() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let sample = environment["AVERAGE_SAMPLE_DIR"], let outputPath = environment["AVERAGE_OUTPUT_DIR"] else {
+            throw XCTSkip("AVERAGE_SAMPLE_DIR と AVERAGE_OUTPUT_DIR を指定したときだけ実行する")
+        }
+        let lights = try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: sample), includingPropertiesForKeys: nil)
+            .filter(RawDecoder.isRawFile)
+            .filter { !$0.lastPathComponent.contains("地上固定") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let output = URL(fileURLWithPath: outputPath)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for clipping in [false, true] {
+            var input = RawStackPipeline.Input(
+                lights: lights, baseIndex: lights.count / 2, darks: [], flats: [], biases: [], mode: .average, align: true,
+                skyGroundMask: nil, maskFeatherRadius: 0, trailMasks: [:])
+            input.sigmaClipping = clipping ? SigmaClipping() : nil
+            let start = Date()
+            let result = try XCTUnwrap(RawStackPipeline.stack(input) { _, _ in })
+            print("合成時間（シグマクリッピング\(clipping ? "あり" : "なし")）: \(Date().timeIntervalSince(start))秒")
+            try result.pixels.withUnsafeBytes { Data($0) }
+                .write(to: output.appendingPathComponent(clipping ? "clipped.raw" : "plain.raw"))
+        }
+    }
 }

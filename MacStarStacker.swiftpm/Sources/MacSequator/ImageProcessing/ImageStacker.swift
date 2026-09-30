@@ -14,7 +14,8 @@ class ImageStacker {
 
     /// Stack the given images using the specified mode.
     /// Returns a 16-bit/channel TIFF-ready NSImage.
-    static func stack(images: [NSImage], mode: StackMode = .average) -> NSImage? {
+    /// - Parameter sigmaClipping: 平均で、外れ値を除いてから平均する（シグマクリッピング）
+    static func stack(images: [NSImage], mode: StackMode = .average, sigmaClipping: SigmaClipping? = nil) -> NSImage? {
         guard !images.isEmpty else { return nil }
 
         guard let firstBuffer = floatBuffer(from: images[0]) else { return nil }
@@ -23,6 +24,28 @@ class ImageStacker {
         var resultPixels = firstBuffer.pixels
 
         switch mode {
+        case .average where sigmaClipping != nil && images.count >= SigmaClipping.minimumFrames:
+            let remainingBuffers = images.dropFirst().compactMap { floatBuffer(from: $0) }
+            guard remainingBuffers.count == images.count - 1,
+                  remainingBuffers.allSatisfy({ $0.width == width && $0.height == height }) else { return nil }
+            let buffers = [firstBuffer] + remainingBuffers
+            let clipping = sigmaClipping!
+            let frameCount = buffers.count
+            let chunk = max(1, pixelCount / 256)
+            resultPixels.withUnsafeMutableBufferPointer { destination in
+                DispatchQueue.concurrentPerform(iterations: (pixelCount + chunk - 1) / chunk) { part in
+                    let values = UnsafeMutablePointer<Float>.allocate(capacity: frameCount)
+                    let scratch = UnsafeMutablePointer<Float>.allocate(capacity: frameCount)
+                    defer { values.deallocate(); scratch.deallocate() }
+                    let end = min(pixelCount, (part + 1) * chunk)
+                    for i in (part * chunk)..<end {
+                        for f in 0..<frameCount { values[f] = buffers[f].pixels[i] }
+                        // 値は0〜1。16bitの1段分をばらつきの下限にする
+                        destination[i] = clipping.clippedMean(values, count: frameCount, scratch: scratch, floor: 1.0 / 65535)
+                    }
+                }
+            }
+
         case .average:
             for image in images.dropFirst() {
                 guard let buf = floatBuffer(from: image),

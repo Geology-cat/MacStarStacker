@@ -194,6 +194,7 @@ enum NightscapeCompositor {
         analysis: Analysis,
         hints: Data?,
         featherRadius: Double = 0,
+        clipping: SigmaClipping? = nil,
         loadFrame: (Int) throws -> [UInt16],
         progress: (Double, String) -> Void
     ) throws -> Outcome {
@@ -210,6 +211,11 @@ enum NightscapeCompositor {
         let mask = featherRadius > 0 ? detected.feathered(radius: featherRadius) : detected
 
         let accumulator = NightscapeAccumulator(mask: mask, samples: samples)
+        // 外れ値（動く星・飛行機など）を除く幅。シグマクリッピングの κ を使う（既定は3）
+        if let clipping {
+            accumulator.rejectionLowSigma = Double(clipping.low)
+            accumulator.rejectionHighSigma = Double(clipping.high)
+        }
         let count = analysis.frameCount
         for (step, index) in analysis.order.enumerated() {
             progress(0.1 + 0.8 * Double(step) / Double(count), "新星景モード: 空と地上を合成中 (\(step + 1)/\(count))...")

@@ -742,10 +742,10 @@ static cv::Mat EncodeLuminance(const cv::Mat &luminance, const cv::Mat &valid) {
     return YES;
 }
 
-/// 画素ごとの中央値と、外れ値とみなす幅（中央値からの許容幅）を求める。
+/// 画素ごとの中央値と、ばらつき（標準偏差の推定。外れ値とみなす幅はこの κ 倍）を求める。
 /// weights が空でなければ、そのフレームで重みが 0 の画素は使わない
 static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::vector<cv::Mat> &weights,
-                               const cv::Size &size, cv::Mat &median, cv::Mat &tolerance) {
+                               const cv::Size &size, cv::Mat &median, cv::Mat &spread) {
     median = cv::Mat::zeros(size, CV_32F);
     cv::Mat mad = cv::Mat::zeros(size, CV_32F);
     cv::Mat counts = cv::Mat::zeros(size, CV_32F);
@@ -773,7 +773,7 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
             }
         }
     });
-    // 画像全体のノイズ（MADの中央値）を下限にし、中央値から3倍を超えて離れた値を外れ値とする。
+    // 画像全体のノイズ（MADの中央値）を下限にする（外れ値とみなすのは、中央値からこの κ 倍を超えて離れた値）。
     // 3枚未満しか無い画素は外れ値を判定できないため除かない
     std::vector<float> values;
     for (int y = 0; y < size.height; y += 4) {
@@ -786,8 +786,8 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
         std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
         noiseFloor = std::max(1.0f, values[values.size() / 2]);
     }
-    tolerance = 3.0f * cv::max(mad, noiseFloor);
-    tolerance.setTo(1e30f, counts < 3.0f);
+    spread = cv::max(mad, noiseFloor);
+    spread.setTo(1e30f, counts < 3.0f);
 }
 
 @end
@@ -803,7 +803,7 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     cv::Mat _skySum, _skyWeight;                   // 確実に空だった画素だけを星に合わせて平均
     cv::Mat _groundSum, _groundWeight;             // 画面全体を地上に合わせて平均（空の部分は星のない空＝光害フレーム）
     bool _rejecting;
-    cv::Mat _skyMedian, _skyTolerance, _groundMedian, _groundTolerance;
+    cv::Mat _skyMedian, _skySpread, _groundMedian, _groundSpread;
     NSInteger _frameCount;
 }
 
@@ -820,6 +820,8 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     _skyWeight = cv::Mat::zeros(size, CV_32F);
     _groundWeight = cv::Mat::zeros(size, CV_32F);
     _rejecting = samples != nil && samples.frameCount >= 3;
+    _rejectionLowSigma = 3;
+    _rejectionHighSigma = 3;
     if (_rejecting) [self prepareRejectionFrom:samples];
     return self;
 }
@@ -833,8 +835,8 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     for (size_t i = 0; i < star.size(); i++) {
         skyWeights.push_back([self skyWeightForStar:starH[i] ground:groundH[i]] > 0.5f);
     }
-    MedianAndTolerance(star, skyWeights, size, _skyMedian, _skyTolerance);
-    MedianAndTolerance(ground, {}, size, _groundMedian, _groundTolerance);
+    MedianAndTolerance(star, skyWeights, size, _skyMedian, _skySpread);
+    MedianAndTolerance(ground, {}, size, _groundMedian, _groundSpread);
 }
 
 - (NSInteger)frameCount {
@@ -849,6 +851,12 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     cv::warpPerspective(_certainSky, weight, hs * hg.inv(), size, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
     cv::threshold(weight, weight, 0.999, 1.0, cv::THRESH_BINARY);
     return weight.mul(WarpValidity(size, hs));
+}
+
+/// 中央値から下側 low・上側 high 倍のばらつきを超えて離れた画素（255）
+static cv::Mat Outliers(const cv::Mat &luminance, const cv::Mat &median, const cv::Mat &spread, double low, double high) {
+    const cv::Mat difference = luminance - median;
+    return (difference > spread * high) | (difference < spread * -low);
 }
 
 static cv::Mat Luminance(const cv::Mat &rgb) {
@@ -881,14 +889,14 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     cv::Mat starWarped;
     cv::warpPerspective(frame, starWarped, hs, size, cv::INTER_LANCZOS4, cv::BORDER_CONSTANT, cv::Scalar::all(0));
     cv::Mat skyWeight = [self skyWeightForStar:hs ground:hg];
-    if (_rejecting) skyWeight.setTo(0, cv::abs(Luminance(starWarped) - _skyMedian) > _skyTolerance);
+    if (_rejecting) skyWeight.setTo(0, Outliers(Luminance(starWarped), _skyMedian, _skySpread, _rejectionLowSigma, _rejectionHighSigma));
     Accumulate(_skySum, _skyWeight, starWarped, skyWeight);
 
     // 地上: 画面全体を地上に合わせて変形して加える（空の部分は動く星が外れ値として除かれ、星のない空になる）
     cv::Mat groundWarped;
     cv::warpPerspective(frame, groundWarped, hg, size, cv::INTER_LANCZOS4, cv::BORDER_CONSTANT, cv::Scalar::all(0));
     cv::Mat groundWeight = WarpValidity(size, hg);
-    if (_rejecting) groundWeight.setTo(0, cv::abs(Luminance(groundWarped) - _groundMedian) > _groundTolerance);
+    if (_rejecting) groundWeight.setTo(0, Outliers(Luminance(groundWarped), _groundMedian, _groundSpread, _rejectionLowSigma, _rejectionHighSigma));
     Accumulate(_groundSum, _groundWeight, groundWarped, groundWeight);
     _frameCount++;
     return YES;

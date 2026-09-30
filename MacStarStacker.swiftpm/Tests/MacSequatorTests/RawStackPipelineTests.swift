@@ -241,6 +241,20 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(median.pixels, pb, "3枚の中央値は中間のフレーム")
     }
 
+    func testAverageWithSigmaClippingRejectsASatelliteOnBayerData() throws {
+        // 5枚のうち1枚だけ、(10, 10) を人工衛星が横切った
+        let urls = try (0..<5).map { index in
+            try makeBayerDNG("clip_\(index).dng") { x, y, _ in (index == 2 && x == 10 && y == 10) ? 15000 : 1000 }.0
+        }
+        var clipped = input(lights: urls, mode: .average)
+        clipped.sigmaClipping = SigmaClipping()
+        let result = try XCTUnwrap(RawStackPipeline.stack(clipped) { _, _ in })
+        XCTAssertEqual(result.kind, .bayer)
+        XCTAssertEqual(result.pixels[10 * 64 + 10], 1000, "光跡の値を除いて平均する")
+        let plain = try XCTUnwrap(RawStackPipeline.stack(input(lights: urls, mode: .average)) { _, _ in })
+        XCTAssertEqual(plain.pixels[10 * 64 + 10], 3800, "シグマクリッピングしなければ平均に入る")
+    }
+
     func testDarkSubtractionKeepsBlackLevelPedestal() throws {
         // 生の値 = 黒512 + 信号。ダーク（黒512 + 熱ノイズ40）を引いても黒レベルは保たれる
         let (light, _) = try makeBayerDNG("light.dng") { _, _, _ in 512 + 40 + 1000 }

@@ -64,6 +64,15 @@ class StackingStateController {
             notifyStateChanged()
         }
     }
+    /// 平均でシグマクリッピング（外れ値を除いてから平均）するか
+    var enableSigmaClipping: Bool = false { didSet { if oldValue != enableSigmaClipping { notifyStateChanged() } } }
+    /// シグマクリッピングの κ（下側・上側）
+    var sigmaClipping = SigmaClipping() { didSet { if oldValue != sigmaClipping { notifyStateChanged() } } }
+    /// 今の合成方法で使うシグマクリッピング。新星景モードでは外れ値（動く星など）を除く必要があるため常に使う
+    var activeSigmaClipping: SigmaClipping? {
+        if isNightscapeActive { return sigmaClipping }
+        return stackMode == "Average" && enableSigmaClipping ? sigmaClipping : nil
+    }
     /// 新星景モード（空は星に、地上は地上に合わせて合成）が有効か
     var isNightscapeActive: Bool { enableSkyGroundMask && stackMode != "Compare Bright" }
     var maskBitmap: NSImage? = nil { didSet { notifyStateChanged() } }
@@ -494,6 +503,8 @@ class StackingStateController {
         maskBitmap = nil
         brushSize = defaults.brushSize
         maskFeatherRadius = defaults.maskFeatherRadius
+        enableSigmaClipping = defaults.enableSigmaClipping
+        sigmaClipping = defaults.sigmaClipping
         nightscapeFeatherRadius = defaults.nightscapeFeatherRadius
         brushMode = defaults.brushMode
 
@@ -694,6 +705,7 @@ class StackingStateController {
         let mask       = useSkyGroundMask ? maskBitmap : nil
         let maskFeather = maskFeatherRadius
         let nightscapeFeather = nightscapeFeatherRadius
+        let clipping = activeSigmaClipping
         let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
         let trailItems = self.detectedTrails
         let knownBaseMetadata = baseImageMetadata
@@ -718,7 +730,8 @@ class StackingStateController {
                         .mapValues { $0.compactMap(\.maskImage) }
                     : [:],
                 nightscape: nightscape,
-                nightscapeFeatherRadius: nightscapeFeather
+                nightscapeFeatherRadius: nightscapeFeather,
+                sigmaClipping: clipping
             )
             var rawFallbackReason: String?
             do {
@@ -754,6 +767,8 @@ class StackingStateController {
                             ? "新星景モード・\(rawResult.modeDescription)" : rawResult.modeDescription
                         self.stackingStatus = "✅ スタッキング完了！（\(method)で合成）"
                             + (rawResult.note.map { "\n\($0)" } ?? "")
+                            + (StackingStateController.sigmaClippingNote(
+                                clipping, frameCount: lightFiles.count, nightscape: rawResult.skyAlpha != nil).map { "\n\($0)" } ?? "")
                         self.isStacking = false
                         self.showResult = true
                         self.notifyStateChanged()
@@ -882,7 +897,8 @@ class StackingStateController {
                         DispatchQueue.main.async { self.nightscapePrepared = .developed(key: nightscapeKey, analysis: analysis) }
                     }
                     let outcome = try NightscapeCompositor.compose(
-                        analysis: analysis, hints: composeHints, featherRadius: Double(nightscapeFeather), loadFrame: loadFrame,
+                        analysis: analysis, hints: composeHints, featherRadius: Double(nightscapeFeather), clipping: clipping,
+                        loadFrame: loadFrame,
                         progress: { fraction, status in report(0.5 + fraction * 0.5, status) })
                     switch outcome {
                     case .composited(let composited):
@@ -984,7 +1000,7 @@ class StackingStateController {
                     featherRadius: maskFeather
                 )
             } else {
-                result = self.stack(images: skyFrames, mode: sMode)
+                result = self.stack(images: skyFrames, mode: sMode, sigmaClipping: sMode == .average ? clipping : nil)
             }
 
             guard let finalResult = result else {
@@ -1012,6 +1028,8 @@ class StackingStateController {
                     status = nightscapeImage != nil ? "✅ スタッキング完了！（新星景モードで合成）" : "✅ スタッキング完了！"
                 }
                 for note in notes { status += "\n\(note)" }
+                if let note = StackingStateController.sigmaClippingNote(
+                    clipping, frameCount: total, nightscape: nightscapeImage != nil) { status += "\n\(note)" }
                 self.stackingStatus = status
                 self.isStacking = false
                 self.showResult = true
@@ -1042,14 +1060,26 @@ class StackingStateController {
         }
     }
 
-    private func stack(images: [NSImage], mode: ImageStacker.StackMode) -> NSImage? {
+    private func stack(images: [NSImage], mode: ImageStacker.StackMode, sigmaClipping: SigmaClipping? = nil) -> NSImage? {
         switch mode {
+        case .average where sigmaClipping != nil:
+            // シグマクリッピングは全フレームの値を比べるため CPU で行う
+            return ImageStacker.stack(images: images, mode: .average, sigmaClipping: sigmaClipping)
         case .average:
             return MetalStacker.create()?.stackAverage(images: images)
                 ?? ImageStacker.stack(images: images, mode: .average)
         case .median, .compareBright:
             return ImageStacker.stack(images: images, mode: mode)
         }
+    }
+
+    /// シグマクリッピングについての完了時の補足（新星景モードは外れ値の幅に使うだけなので書かない）
+    static func sigmaClippingNote(_ clipping: SigmaClipping?, frameCount: Int, nightscape: Bool) -> String? {
+        guard let clipping, !nightscape else { return nil }
+        guard frameCount >= SigmaClipping.minimumFrames else {
+            return "\(SigmaClipping.minimumFrames)枚未満のため、シグマクリッピングは行わずに平均しました"
+        }
+        return String(format: "シグマクリッピング（κ 下側%.1f・上側%.1f）で外れ値を除いて平均しました", clipping.low, clipping.high)
     }
 
     /// センサーの向きのマスク画像を、表示（撮影時）の向きにする

@@ -89,6 +89,11 @@ enum RawStackPipeline {
         var nightscape: Bool = false
         /// 新星景モードの境界ぼかし（px）。0 なら自動で決めた境界のまま
         var nightscapeFeatherRadius: CGFloat = 0
+        /// 平均でシグマクリッピング（外れ値を除いてから平均）する。新星景モードでは外れ値を除く幅に使う
+        var sigmaClipping: SigmaClipping? = nil
+
+        /// 平均の合成で使うシグマクリッピング（平均以外では nil）
+        var averageClipping: SigmaClipping? { mode == .average ? sigmaClipping : nil }
 
         var usesNightscape: Bool { nightscape && mode != .compareBright }
     }
@@ -122,7 +127,8 @@ enum RawStackPipeline {
         let baseIndex = min(max(0, input.baseIndex), input.lights.count - 1)
         let firstInfo = try RawDecoder.readInfo(from: input.lights[0])
         try checkMemory(frameCount: input.lights.count, info: firstInfo, kind: kind,
-                        mode: input.mode, hasSkyGroundMask: input.skyGroundMask != nil, nightscape: input.usesNightscape)
+                        mode: input.mode, hasSkyGroundMask: input.skyGroundMask != nil, nightscape: input.usesNightscape,
+                        sigmaClipping: input.averageClipping != nil)
 
         progress(0.02, "キャリブレーションフレームを構築中...")
         let darkMaster = try buildMaster(input.darks)
@@ -160,7 +166,8 @@ enum RawStackPipeline {
     /// 中央値合成は全フレームを保持するため、搭載メモリに収まるかを事前に確認する。
     static func checkMemory(
         frameCount: Int, info: RawSensorInfo, kind: RawStackResult.Kind, mode: Mode, hasSkyGroundMask: Bool,
-        nightscape: Bool = false, physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
+        nightscape: Bool = false, sigmaClipping: Bool = false,
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) throws {
         if nightscape {
             // 新星景モードは外れ値を除くため、各フレームの輝度を2通り（星基準・地上基準）16bitで保持する
@@ -174,7 +181,9 @@ enum RawStackPipeline {
             }
             // 空と地上を分ける必要が無いときは通常の合成（中央値ならフレームを保持）になるため、続けて確認する
         }
-        guard mode == .median else { return }
+        // 中央値とシグマクリッピングは全フレームを保持する
+        let retainsFrames = mode == .median || (mode == .average && sigmaClipping)
+        guard retainsFrames else { return }
         let samplesPerFrame = info.width * info.height * (kind == .cameraRGB ? 3 : 1)
         // 位置合わせありで空と地上を分けると、地上側（位置合わせ前）も別に中央値用に保持する
         let retainingStackers: UInt64 = (hasSkyGroundMask && kind == .cameraRGB) ? 2 : 1
@@ -182,8 +191,10 @@ enum RawStackPipeline {
         let budget = physicalMemory / 2
         if required > budget {
             let gigabytes = String(format: "%.1f", Double(required) / 1_073_741_824)
+            let method = mode == .median ? "中央値合成" : "シグマクリッピング"
+            let advice = mode == .median ? "平均で合成してください" : "シグマクリッピングを外してください"
             throw PipelineError(
-                message: "中央値合成に約\(gigabytes)GBのメモリが必要なため実行できません。枚数を減らすか、平均で合成してください",
+                message: "\(method)に約\(gigabytes)GBのメモリが必要なため実行できません。枚数を減らすか、\(advice)",
                 allowsFallback: false
             )
         }
@@ -199,7 +210,7 @@ enum RawStackPipeline {
         progress: Progress
     ) throws -> RawStackResult {
         let total = input.lights.count
-        let skyStacker = StreamingStacker(mode: input.mode, count: pixelCount,
+        let skyStacker = StreamingStacker(mode: input.mode, count: pixelCount, clipping: input.averageClipping,
                                           grouping: .bayerBlocks(width: info.width, height: info.height,
                                                                  weights: brightWeights(info, colors: info.cfaPattern)))
         // 地上側は固定構図のままノイズを減らす（比較明の場合は平均）
@@ -285,7 +296,7 @@ enum RawStackPipeline {
             throw PipelineError(message: "星の位置合わせを準備できませんでした（\(error.localizedDescription)）")
         }
 
-        let skyStacker = StreamingStacker(mode: input.mode, count: sampleCount,
+        let skyStacker = StreamingStacker(mode: input.mode, count: sampleCount, clipping: input.averageClipping,
                                           grouping: .rgbPixels(weights: brightWeights(info, colors: [0, 1, 2])))
         let groundMode: Mode = input.mode == .median ? .median : .average
         let groundStacker = input.skyGroundMask != nil ? StreamingStacker(mode: groundMode, count: sampleCount) : nil
@@ -471,6 +482,7 @@ enum RawStackPipeline {
         if !reused { hints = hints.flatMap(NightscapeCompositor.userHints) }
         let outcome = try NightscapeCompositor.compose(
             analysis: preparation.analysis, hints: hints, featherRadius: Double(input.nightscapeFeatherRadius),
+            clipping: input.sigmaClipping,
             loadFrame: { index in
                 let frame = try demosaic(index)
                 guard frame.width == width, frame.height == height else {
@@ -882,6 +894,8 @@ final class StreamingStacker {
     private let mode: RawStackPipeline.Mode
     private let count: Int
     private let grouping: BrightGrouping
+    /// 平均でシグマクリッピングする（全フレームを保持する）
+    private let clipping: SigmaClipping?
     /// ブロック・画素ごとの採用中フレームの明るさ
     private var bestScore: [Float] = []
     /// 16bit値を整数のまま積算する（Floatでは数百枚を超えると丸め誤差が出るため）
@@ -890,9 +904,10 @@ final class StreamingStacker {
     private var frames: [[UInt16]] = []
     private var added = 0
 
-    init(mode: RawStackPipeline.Mode, count: Int, grouping: BrightGrouping = .samples) {
+    init(mode: RawStackPipeline.Mode, count: Int, clipping: SigmaClipping? = nil, grouping: BrightGrouping = .samples) {
         self.mode = mode
         self.count = count
+        self.clipping = mode == .average ? clipping : nil
         self.grouping = grouping
     }
 
@@ -900,6 +915,8 @@ final class StreamingStacker {
         precondition(frame.count == count, "合成するフレームの画素数が一致しません")
         added += 1
         switch mode {
+        case .average where clipping != nil:
+            frames.append(frame)
         case .average:
             if sum.isEmpty { sum = [UInt32](repeating: 0, count: count) }
             let chunk = max(1, count / 64)
@@ -941,6 +958,8 @@ final class StreamingStacker {
     func result() -> [UInt16] {
         guard added > 0 else { return [UInt16](repeating: 0, count: count) }
         switch mode {
+        case .average where clipping != nil:
+            return clipping!.stack(frames)
         case .average:
             let divisor = UInt64(added)
             return sum.map { UInt16(min(65535, (UInt64($0) + divisor / 2) / divisor)) }
