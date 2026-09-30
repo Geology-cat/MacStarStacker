@@ -16,7 +16,7 @@ class StackingStateController {
 
     // ── 画像リスト ──
     var images: [ImageType: [ImageFile]] = [
-        .light: [], .dark: [], .flat: [], .bias: []
+        .light: [], .dark: [], .flat: [], .bias: [], .groundFixed: []
     ]
     var baseImage: ImageFile? {
         didSet {
@@ -75,6 +75,14 @@ class StackingStateController {
     }
     /// 新星景モード（空は星に、地上は地上に合わせて合成）が有効か
     var isNightscapeActive: Bool { enableSkyGroundMask && stackMode != "Compare Bright" }
+    /// 地上固定フレームを使う新星景モードか（地上はそのフレームにし、判定・合成もそのフレームの構図で行う）
+    var isGroundFixedActive: Bool { isNightscapeActive && !(images[.groundFixed] ?? []).isEmpty }
+    /// 新星景モードの判定結果（マスク）を重ねる画像。地上固定フレームを使うときは1枚目の地上固定フレーム
+    var nightscapeReferenceImage: ImageFile? {
+        isGroundFixedActive ? images[.groundFixed]?.first : baseImage
+    }
+    /// 前回の入力で地上固定フレームを使っていたか（使う・使わないが変わるとマスクの構図が変わる）
+    private var maskUsesGroundFixed = false
     var maskBitmap: NSImage? = nil { didSet { notifyStateChanged() } }
     var brushSize: CGFloat = 20.0 { didSet { if oldValue != brushSize { notifyStateChanged() } } }
     /// 空と地上を合成するときの境界ぼかし半径（最終画像上のピクセル単位）。
@@ -227,7 +235,9 @@ class StackingStateController {
             current.append(file)
             newFiles.append(file)
             if type == .light && baseImage == nil { baseImage = file }
-            if previewImage == nil { previewImage = file }
+            if previewImage == nil || (type == .groundFixed && isNightscapeActive && current.count == 1) {
+                previewImage = file
+            }
         }
         images[type] = current
         if type == .light {
@@ -284,7 +294,7 @@ class StackingStateController {
             invalidateTrailAnalysis()
             normalizeTimelapseRange()
         }
-        if previewImage?.id == file.id { previewImage = images[type]?.first }
+        if previewImage?.id == file.id { previewImage = images[type]?.first ?? baseImage }
         if baseImage?.id == file.id   { baseImage = images[.light]?.first }
         nightscapeInputsDidChange()
         notifyStateChanged()
@@ -299,7 +309,7 @@ class StackingStateController {
             invalidateTrailAnalysis()
             normalizeTimelapseRange()
         }
-        if removedPreview { previewImage = images[.light]?.first }
+        if removedPreview { previewImage = baseImage ?? images[.light]?.first }
         nightscapeInputsDidChange()
         notifyStateChanged()
     }
@@ -326,13 +336,27 @@ class StackingStateController {
             biases: (images[.bias] ?? []).map(\.url),
             mode: stackMode == "Median" ? .median : .average,
             align: true, skyGroundMask: mask, maskFeatherRadius: 0, trailMasks: [:],
-            nightscape: true, nightscapeFeatherRadius: nightscapeFeatherRadius
+            nightscape: true, nightscapeFeatherRadius: nightscapeFeatherRadius,
+            groundFixed: (images[.groundFixed] ?? []).map(\.url)
         )
     }
 
     /// 新星景モードの入力（Light・基準画像・キャリブレーション画像・合成方法）が変わったとき。
     /// 解析は「解析開始」で行う。前の解析と自動判定の結果（位置がずれている）は手放し、ブラシで塗った所は残す
     func nightscapeInputsDidChange() {
+        // 地上固定フレームを使う・使わないが変わると、マスクの構図（どの画像の上に塗ったか）が変わるため、
+        // ブラシで塗った所も含めて消す（追尾撮影では位置がずれる）
+        var clearedMask = false
+        if maskUsesGroundFixed != isGroundFixedActive {
+            maskUsesGroundFixed = isGroundFixedActive
+            if maskBitmap != nil {
+                maskBitmap = nil
+                clearedMask = true
+                nightscapeAnalysisStatus = isGroundFixedActive
+                    ? "地上固定フレームを使うため、マスクを消しました。「解析開始」を押すと地上固定フレームの上で空と地上を判定します"
+                    : "地上固定フレームを使わなくなったため、マスクを消しました"
+            }
+        }
         guard isNightscapeActive else {
             cancelNightscapeAnalysis()
             return
@@ -345,7 +369,9 @@ class StackingStateController {
         if let prepared = nightscapePrepared, prepared.key != key {
             nightscapePrepared = nil
             maskBitmap = NightscapeCompositor.userStrokesOnly(maskBitmap)
-            nightscapeAnalysisStatus = "Light・基準画像などが変わりました。「解析開始」を押すと空と地上を判定し直します"
+            if !clearedMask {
+                nightscapeAnalysisStatus = "Light・基準画像などが変わりました。「解析開始」を押すと空と地上を判定し直します"
+            }
         }
     }
 
@@ -363,7 +389,7 @@ class StackingStateController {
     /// 解析の結果は合成で使い回す
     func analyzeNightscape() {
         cancelNightscapeAnalysis()
-        guard isNightscapeActive, !isStacking, let base = baseImage,
+        guard isNightscapeActive, !isStacking, let base = nightscapeReferenceImage,
               (images[.light] ?? []).count >= 2, let input = nightscapeInput(mask: maskBitmap) else { return }
         let token = CancellationToken()
         nightscapeAnalysisToken = token
@@ -415,7 +441,8 @@ class StackingStateController {
                     if let overlay {
                         // 解析中にブラシで塗った所も残す
                         self.maskBitmap = NightscapeCompositor.mergingUserStrokes(from: self.maskBitmap, onto: overlay)
-                        // 判定結果は基準画像の上に表示する（ブラシで直せるよう、スタック結果ではなく元画像を表示する）
+                        // 判定結果は基準画像（地上固定フレームを使うときは地上固定フレーム）の上に表示する
+                        // （ブラシで直せるよう、スタック結果ではなく元画像を表示する）
                         self.previewImage = base
                         self.showResult = false
                         self.nightscapeAnalysisStatus = "空と地上を自動で判定しました。違う所があればブラシで直してから、スタッキングを開始してください"
@@ -453,6 +480,9 @@ class StackingStateController {
             return built
         }
         let masterDark = try master(input.darks), masterFlat = try master(input.flats), masterBias = try master(input.biases)
+        let groundReference = try input.usesGroundFixed
+            ? developedGroundReference(input: input, masterBias: masterBias, masterFlat: masterFlat, progress: progress)
+            : nil
         func load(_ index: Int) throws -> NightscapeCompositor.RGB16Image {
             let url = input.lights[index]
             guard let image = ImageLoader.load(from: url),
@@ -469,9 +499,9 @@ class StackingStateController {
             .flatMap { NightscapeCompositor.hints(from: $0, width: first.width, height: first.height) }
             .flatMap(NightscapeCompositor.userHints)
         // ブラシで直している間も解析を持ち続けるため、現像したフレームは保持しない（メモリを抑える）
-        return try NightscapeCompositor.analyze(
+        let analysis = try NightscapeCompositor.analyze(
             frameCount: input.lights.count, baseIndex: baseIndex, width: first.width, height: first.height, hints: hints,
-            cacheFrames: false, isCancelled: isCancelled,
+            groundReference: groundReference?.pixels, cacheFrames: false, isCancelled: isCancelled,
             loadFrame: { index in
                 if index == baseIndex { return first.pixels }
                 let frame = try load(index)
@@ -482,6 +512,39 @@ class StackingStateController {
             },
             progress: progress
         )
+        if groundReference?.matchedExposure == false { analysis.groundReferenceNote = NightscapeCompositor.unmatchedExposureNote }
+        return analysis
+    }
+
+    /// 現像済み画像での地上固定フレーム: 読み込んで（ダークは露出時間が違うため使わない）線形の16bit RGBにし、
+    /// 露出を Light（基準画像）に揃えて1枚にする
+    static func developedGroundReference(
+        input: RawStackPipeline.Input, masterBias: NSImage?, masterFlat: NSImage?, progress: (Double, String) -> Void
+    ) throws -> (pixels: [UInt16], matchedExposure: Bool) {
+        let lightMetadata = RawMetadataExtractor.extract(from: input.lights[min(max(0, input.baseIndex), input.lights.count - 1)])
+        var frames: [[UInt16]] = []
+        var scales: [Double] = []
+        var size: (Int, Int)?
+        var matchedExposure = true
+        for (index, url) in input.groundFixed.enumerated() {
+            progress(0.02, "地上固定フレームを読み込み中 (\(index + 1)/\(input.groundFixed.count))...")
+            guard let image = ImageLoader.load(from: url),
+                  let calibrated = CalibrationProcessor.calibrate(light: image, masterBias: masterBias, masterDark: nil,
+                                                                  masterFlat: masterFlat),
+                  let rgb = NightscapeCompositor.rgb16(from: calibrated) else {
+                throw NightscapeCompositor.CompositorError(message: "地上固定フレームを読み込めませんでした: \(url.lastPathComponent)")
+            }
+            if let size, size != (rgb.width, rgb.height) {
+                throw NightscapeCompositor.CompositorError(message: "地上固定フレームの大きさが一致しません: \(url.lastPathComponent)")
+            }
+            size = (rgb.width, rgb.height)
+            frames.append(rgb.pixels)
+            let scale = NightscapeCompositor.exposureScale(light: lightMetadata, ground: RawMetadataExtractor.extract(from: url))
+            if scale == nil { matchedExposure = false }
+            scales.append(scale ?? 1)
+        }
+        return (NightscapeCompositor.groundReference(frames: frames, scales: scales, blackLevel: 0, whiteLevel: 65535),
+                matchedExposure)
     }
 
     /// 読み込んだ画像・結果・マスク・各種設定をすべて破棄し、起動直後の状態へ戻す。
@@ -504,6 +567,7 @@ class StackingStateController {
         nightscapePrepared = nil
         nightscapeAnalysisStatus = ""
         maskBitmap = nil
+        maskUsesGroundFixed = false
         brushSize = defaults.brushSize
         maskFeatherRadius = defaults.maskFeatherRadius
         enableSigmaClipping = defaults.enableSigmaClipping
@@ -711,6 +775,7 @@ class StackingStateController {
         let maskFeather = maskFeatherRadius
         let nightscapeFeather = nightscapeFeatherRadius
         let clipping = activeSigmaClipping
+        let groundFixedURLs = isGroundFixedActive ? (images[.groundFixed] ?? []).map(\.url) : []
         let trailRemovalActive = (mode == "Compare Bright" && enableTrailRemoval)
         let trailItems = self.detectedTrails
         let knownBaseMetadata = baseImageMetadata
@@ -736,7 +801,8 @@ class StackingStateController {
                     : [:],
                 nightscape: nightscape,
                 nightscapeFeatherRadius: nightscapeFeather,
-                sigmaClipping: clipping
+                sigmaClipping: clipping,
+                groundFixed: groundFixedURLs
             )
             var rawFallbackReason: String?
             do {
@@ -893,10 +959,18 @@ class StackingStateController {
                     } else {
                         // 前回の自動判定の結果は、その解析を使い回すときだけ手がかりにする
                         composeHints = hints.flatMap(NightscapeCompositor.userHints)
+                        let groundReference = groundFixedURLs.isEmpty ? nil : try StackingStateController.developedGroundReference(
+                            input: rawInput, masterBias: masterBias, masterFlat: masterFlat, progress: { _, status in
+                                DispatchQueue.main.async { self.stackingStatus = status }
+                            })
                         analysis = try NightscapeCompositor.analyze(
                             frameCount: total, baseIndex: baseIndex, width: first.width, height: first.height,
-                            hints: hints.flatMap(NightscapeCompositor.userHints), loadFrame: loadFrame,
+                            hints: hints.flatMap(NightscapeCompositor.userHints), groundReference: groundReference?.pixels,
+                            loadFrame: loadFrame,
                             progress: { fraction, status in report(fraction * 0.5, status) })
+                        if groundReference?.matchedExposure == false {
+                            analysis.groundReferenceNote = NightscapeCompositor.unmatchedExposureNote
+                        }
                     }
                     if let nightscapeKey {
                         DispatchQueue.main.async { self.nightscapePrepared = .developed(key: nightscapeKey, analysis: analysis) }
@@ -913,13 +987,21 @@ class StackingStateController {
                             skyAlpha: composited.skyAlpha, width: first.width, height: first.height
                         ).map { NSImage(cgImage: $0, size: NSSize(width: first.width, height: first.height)) }
                         if mode == "Median" { notes.append("新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました") }
+                        if !groundFixedURLs.isEmpty {
+                            notes.append("地上は地上固定フレーム（\(groundFixedURLs.count)枚）にし、その構図で合成しました")
+                            if let note = analysis.groundReferenceNote { notes.append(note) }
+                        }
                         if composited.groundFallbackCount > 0 {
                             notes.append("地上の位置合わせができなかった\(composited.groundFallbackCount)枚は、隣のフレームと同じ動きとして合成しました")
                         }
                     case .notNeeded(let reason):
-                        notes.append(reason)
+                        notes.append(groundFixedURLs.isEmpty ? reason : "\(reason)。地上固定フレームは使いませんでした")
                         alignFrames = true
                     }
+                } catch where !groundFixedURLs.isEmpty {
+                    // 地上固定フレームを登録したときは、黙って地上固定フレームを使わない合成にしない
+                    self.finishStackingWithError("新星景モード（地上固定フレーム）で合成できませんでした（\(error.localizedDescription)）")
+                    return
                 } catch {
                     notes.append("新星景モードで合成できなかったため、空と地上を分けずに合成しました（\(error.localizedDescription)）")
                 }

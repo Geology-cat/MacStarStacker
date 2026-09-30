@@ -79,6 +79,8 @@ bash MacStarStacker.swiftpm/build_app.sh
   NIGHTSCAPE_SAMPLE_DIR=<RAWのフォルダ> NIGHTSCAPE_OUTPUT_DIR=<書き出し先> NIGHTSCAPE_BASE_INDEX=<基準の番号> \
     swift test --package-path MacStarStacker.swiftpm --filter NightscapeSampleTests/testComposeSampleFolder
   ```
+  地上固定フレームを試すときは `NIGHTSCAPE_GROUND_FIXED=<地上固定フレームのパス（カンマ区切り）>` を足す
+  （名前に「地上固定」を含むファイルは、指定しないときも Light に含めない）。
 - `swift test` はビルドしているMacのアーキテクチャだけで動く。開発用のMacはIntelなので、arm64 版は実行して確認できない。
 - 10.13 での実際の動作は、10.13 の仮想マシンか実機で確認する必要がある（CIでは実行できない）。
 

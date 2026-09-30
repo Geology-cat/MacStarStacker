@@ -79,6 +79,12 @@ public class SettingsViewController: NSViewController {
     )
     /// 新星景モード・比較明でのマスクの使い方の説明
     private let skyGroundHintLabel = NSTextField(wrappingLabelWithString: "")
+    /// 新星景モードの地上固定フレームの登録・解除ボタン（比較明では高さを0にして隠す）
+    private let groundFixedRow = NSView()
+    private let registerGroundFixedButton = NSButton()
+    private let clearGroundFixedButton = NSButton()
+    private var groundFixedRowHeight: NSLayoutConstraint?
+    private var groundFixedRowSpacing: NSLayoutConstraint?
     /// 新星景モードの「解析開始」ボタン（比較明では高さを0にして隠す）
     private let analyzeNightscapeButton = NSButton()
     private var analyzeNightscapeButtonHeight: NSLayoutConstraint?
@@ -296,6 +302,32 @@ public class SettingsViewController: NSViewController {
         analyzeNightscapeButton.action = #selector(onAnalyzeNightscapeClicked)
         analyzeNightscapeButton.toolTip = "全フレームを位置合わせして空と地上を自動で判定します（ブラシで塗った所は残ります）。解析の結果はスタッキングで使い回します"
 
+        groundFixedRow.translatesAutoresizingMaskIntoConstraints = false
+        for button in [registerGroundFixedButton, clearGroundFixedButton] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .roundRect
+            button.font = NSFont.systemFont(ofSize: 11)
+            button.target = self
+            groundFixedRow.addSubview(button)
+        }
+        registerGroundFixedButton.title = "地上固定フレーム登録…"
+        registerGroundFixedButton.action = #selector(onRegisterGroundFixedClicked)
+        registerGroundFixedButton.toolTip = "同じ三脚で撮った地上の写真を登録すると、地上はその写真（複数枚なら中央値で1枚にしたもの）にし、"
+            + "その構図で空と地上を判定して合成します。明るさは撮影情報（露出時間・ISO・F値）で Light に揃えます"
+        clearGroundFixedButton.title = "解除"
+        clearGroundFixedButton.action = #selector(onClearGroundFixedClicked)
+        clearGroundFixedButton.toolTip = "登録した地上固定フレームをすべて外します"
+        NSLayoutConstraint.activate([
+            registerGroundFixedButton.topAnchor.constraint(equalTo: groundFixedRow.topAnchor),
+            registerGroundFixedButton.bottomAnchor.constraint(equalTo: groundFixedRow.bottomAnchor),
+            registerGroundFixedButton.leadingAnchor.constraint(equalTo: groundFixedRow.leadingAnchor),
+            clearGroundFixedButton.topAnchor.constraint(equalTo: groundFixedRow.topAnchor),
+            clearGroundFixedButton.bottomAnchor.constraint(equalTo: groundFixedRow.bottomAnchor),
+            clearGroundFixedButton.leadingAnchor.constraint(equalTo: registerGroundFixedButton.trailingAnchor, constant: 4),
+            clearGroundFixedButton.trailingAnchor.constraint(equalTo: groundFixedRow.trailingAnchor),
+            clearGroundFixedButton.widthAnchor.constraint(equalToConstant: 48),
+        ])
+
         brushModeSegmented.translatesAutoresizingMaskIntoConstraints = false
         brushModeSegmented.segmentCount = 3
         brushModeSegmented.setLabel("空 (青)", forSegment: 0)
@@ -344,6 +376,7 @@ public class SettingsViewController: NSViewController {
 
         maskCard.container.addSubview(skyGroundMaskCheckbox)
         maskCard.container.addSubview(skyGroundHintLabel)
+        maskCard.container.addSubview(groundFixedRow)
         maskCard.container.addSubview(analyzeNightscapeButton)
         maskCard.container.addSubview(brushModeSegmented)
         maskCard.container.addSubview(sizeTitle)
@@ -363,6 +396,8 @@ public class SettingsViewController: NSViewController {
             skyGroundHintLabel.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             skyGroundHintLabel.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
+            groundFixedRow.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
+            groundFixedRow.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
             analyzeNightscapeButton.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             analyzeNightscapeButton.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
             brushModeSegmented.topAnchor.constraint(equalTo: analyzeNightscapeButton.bottomAnchor, constant: 6),
@@ -399,7 +434,12 @@ public class SettingsViewController: NSViewController {
             clearMaskButton.bottomAnchor.constraint(equalTo: maskCard.container.bottomAnchor),
         ])
 
-        let buttonSpacing = analyzeNightscapeButton.topAnchor.constraint(equalTo: skyGroundHintLabel.bottomAnchor, constant: 6)
+        let groundSpacing = groundFixedRow.topAnchor.constraint(equalTo: skyGroundHintLabel.bottomAnchor, constant: 6)
+        let groundHeight = groundFixedRow.heightAnchor.constraint(equalToConstant: 24)
+        NSLayoutConstraint.activate([groundSpacing, groundHeight])
+        groundFixedRowSpacing = groundSpacing
+        groundFixedRowHeight = groundHeight
+        let buttonSpacing = analyzeNightscapeButton.topAnchor.constraint(equalTo: groundFixedRow.bottomAnchor, constant: 6)
         let buttonHeight = analyzeNightscapeButton.heightAnchor.constraint(equalToConstant: 24)
         NSLayoutConstraint.activate([buttonSpacing, buttonHeight])
         analyzeNightscapeButtonSpacing = buttonSpacing
@@ -911,7 +951,9 @@ public class SettingsViewController: NSViewController {
         } else if state.enableSkyGroundMask && !state.nightscapeAnalysisStatus.isEmpty {
             skyGroundHintLabel.stringValue = state.nightscapeAnalysisStatus
         } else {
-            skyGroundHintLabel.stringValue = "「解析開始」を押すと、全フレームを解析して空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
+            skyGroundHintLabel.stringValue = state.isGroundFixedActive
+                ? "「解析開始」を押すと、全フレームを解析して、地上固定フレームの上で空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
+                : "「解析開始」を押すと、全フレームを解析して空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
         }
         skyGroundHintLabel.isEnabled = state.enableSkyGroundMask
         // 解析開始ボタン（新星景モードのときだけ表示）
@@ -924,6 +966,17 @@ public class SettingsViewController: NSViewController {
             : "解析開始"
         analyzeNightscapeButton.isEnabled = state.isNightscapeActive && !state.isAnalyzingNightscape && !state.isStacking
             && lightCount >= 2 && state.baseImage != nil
+        // 地上固定フレームの登録（新星景モードのときだけ表示）
+        let groundFixedCount = state.count(for: .groundFixed)
+        groundFixedRow.isHidden = !showsAnalyzeButton
+        groundFixedRowHeight?.constant = showsAnalyzeButton ? 24 : 0
+        groundFixedRowSpacing?.constant = showsAnalyzeButton ? 6 : 0
+        registerGroundFixedButton.title = groundFixedCount > 0
+            ? "地上固定フレーム登録…（\(groundFixedCount)枚）"
+            : "地上固定フレーム登録…"
+        let canEditGroundFixed = state.isNightscapeActive && !state.isAnalyzingNightscape && !state.isStacking
+        registerGroundFixedButton.isEnabled = canEditGroundFixed
+        clearGroundFixedButton.isEnabled = canEditGroundFixed && groundFixedCount > 0
         switch state.brushMode {
         case .sky: brushModeSegmented.selectedSegment = 0
         case .ground: brushModeSegmented.selectedSegment = 1
@@ -1071,6 +1124,18 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onAnalyzeTrailsClicked() {
         StackingStateController.shared.analyzeTrails()
+    }
+
+    @objc private func onRegisterGroundFixedClicked() {
+        let panel = ImageImportSupport.makeOpenPanel(title: "地上固定フレームを選択")
+        panel.begin { response in
+            guard response == .OK else { return }
+            StackingStateController.shared.add(urls: panel.urls, to: .groundFixed)
+        }
+    }
+
+    @objc private func onClearGroundFixedClicked() {
+        StackingStateController.shared.clear(type: .groundFixed)
     }
 
     @objc private func onAnalyzeNightscapeClicked() {

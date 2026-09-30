@@ -47,6 +47,21 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     private let baseInfoLabel = NSTextField(labelWithString: "")
 
     private var currentType: ImageType = .light
+
+    /// 一覧の行。Light タブでは、地上固定フレームがあれば一番上に「地上固定フレーム」の見出しと行を出す
+    private enum Row {
+        case header(String)
+        case file(ImageFile, ImageType)
+    }
+
+    private var rows: [Row] {
+        let state = StackingStateController.shared
+        let files = state.images[currentType] ?? []
+        let groundFixed = currentType == .light ? (state.images[.groundFixed] ?? []) : []
+        guard !groundFixed.isEmpty else { return files.map { .file($0, currentType) } }
+        return [.header("地上固定フレーム（\(groundFixed.count)）")] + groundFixed.map { .file($0, .groundFixed) }
+            + [.header("Light（\(files.count)）")] + files.map { .file($0, .light) }
+    }
     private var stateChangeObserver: NSObjectProtocol?
     private var stateResetObserver: NSObjectProtocol?
 
@@ -240,15 +255,18 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     private var displayedFile: ImageFile? {
         let state = StackingStateController.shared
         if state.showResult, state.stackedResult != nil { return nil }
-        return state.previewImage ?? state.baseImage
+        return state.previewImage ?? state.nightscapeReferenceImage
     }
 
     /// 再読み込みで消える選択を、プレビューに表示中のファイルの行に戻す
     private func selectDisplayedRow() {
-        let files = StackingStateController.shared.images[currentType] ?? []
+        let rows = self.rows
         isSyncingSelection = true
         defer { isSyncingSelection = false }
-        if let displayed = displayedFile, let row = files.firstIndex(where: { $0.id == displayed.id }) {
+        if let displayed = displayedFile, let row = rows.firstIndex(where: {
+            if case .file(let file, _) = $0 { return file.id == displayed.id }
+            return false
+        }) {
             tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             tableView.scrollRowToVisible(row)
         } else {
@@ -259,12 +277,39 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     // MARK: - NSTableViewDataSource & Delegate
 
     public func numberOfRows(in tableView: NSTableView) -> Int {
-        return StackingStateController.shared.images[currentType]?.count ?? 0
+        return rows.count
+    }
+
+    public func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        let rows = self.rows
+        guard row < rows.count, case .header = rows[row] else { return false }
+        return true
+    }
+
+    public func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        let rows = self.rows
+        guard row < rows.count, case .header = rows[row] else { return tableView.rowHeight }
+        return 22
+    }
+
+    public func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        return !self.tableView(tableView, isGroupRow: row)
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let files = StackingStateController.shared.images[currentType], row < files.count else { return nil }
-        let file = files[row]
+        let rows = self.rows
+        guard row < rows.count else { return nil }
+        let file: ImageFile, type: ImageType
+        switch rows[row] {
+        case .header(let title):
+            let label = NSTextField(labelWithString: title)
+            label.font = NSFont.boldSystemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            return label
+        case .file(let rowFile, let rowType):
+            file = rowFile
+            type = rowType
+        }
 
         let cellIdentifier = NSUserInterfaceItemIdentifier("FileCell")
         var cell = tableView.makeView(withIdentifier: cellIdentifier, owner: self) as? FileTableCellView
@@ -277,15 +322,15 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
         cell?.configure(
             file: file,
             isBase: isBase,
+            canBeBase: type != .groundFixed,
             isDisplayed: displayedFile?.id == file.id,
             onSetBase: { [weak self] in
                 StackingStateController.shared.baseImage = file
                 StackingStateController.shared.previewImage = file
                 self?.updateUI()
             },
-            onRemove: { [weak self] in
-                guard let self = self else { return }
-                StackingStateController.shared.remove(file: file, from: self.currentType)
+            onRemove: {
+                StackingStateController.shared.remove(file: file, from: type)
             }
         )
 
@@ -295,8 +340,8 @@ public class FileListViewController: NSViewController, NSTableViewDataSource, NS
     public func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isSyncingSelection else { return }
         let row = tableView.selectedRow
-        guard row >= 0, let files = StackingStateController.shared.images[currentType], row < files.count else { return }
-        let file = files[row]
+        let rows = self.rows
+        guard row >= 0, row < rows.count, case .file(let file, _) = rows[row] else { return }
         StackingStateController.shared.previewImage = file
         StackingStateController.shared.showResult = false
     }
@@ -418,8 +463,10 @@ class FileTableCellView: NSTableCellView {
         ])
     }
 
-    public func configure(file: ImageFile, isBase: Bool, isDisplayed: Bool,
+    public func configure(file: ImageFile, isBase: Bool, canBeBase: Bool = true, isDisplayed: Bool,
                           onSetBase: @escaping () -> Void, onRemove: @escaping () -> Void) {
+        // 地上固定フレームは基準画像にできないため ★ を出さない
+        starButton.isHidden = !canBeBase
         self.onSetBase = onSetBase
         self.onRemove = onRemove
 

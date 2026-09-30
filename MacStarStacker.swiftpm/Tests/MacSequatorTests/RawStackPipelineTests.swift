@@ -146,6 +146,23 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertNil(RawStackPipeline.route(for: input(lights: [a, jpeg], mode: .average)))
     }
 
+    /// RAW の Light に RAW でない地上固定フレームを登録したときは、黙って地上固定フレームを使わない合成にせずに知らせる
+    func testGroundFixedFrameMustBeACompatibleRaw() throws {
+        let (a, _) = try makeBayerDNG("a.dng") { _, _, _ in 1000 }
+        let (b, _) = try makeBayerDNG("b.dng") { _, _, _ in 1000 }
+        let jpeg = directory.appendingPathComponent("ground.jpg")
+        try Data([0xFF, 0xD8]).write(to: jpeg)
+        var nightscape = input(lights: [a, b], mode: .average)
+        nightscape.nightscape = true
+        nightscape.groundFixed = [jpeg]
+        XCTAssertEqual(RawStackPipeline.route(for: nightscape), .cameraRGB, "地上固定フレームで経路は変えない")
+        XCTAssertThrowsError(try RawStackPipeline.stack(nightscape) { _, _ in }) { error in
+            let pipelineError = error as? RawStackPipeline.PipelineError
+            XCTAssertEqual(pipelineError?.allowsFallback, false)
+            XCTAssertTrue(pipelineError?.message.contains("地上固定フレーム") == true, "\(error)")
+        }
+    }
+
     // MARK: - ベイヤー配列のまま合成
 
     /// テスト用カメラ（AsShotNeutral 0.5, 1, 0.6）での比較明合成の重み。RGGBの各位置のWB係数の逆数。

@@ -903,11 +903,19 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
 }
 
 - (nullable NSData *)composeWithError:(NSError **)error {
+    return [self composeOntoGround:nil error:error];
+}
+
+- (nullable NSData *)composeOntoGround:(nullable NSData *)groundRGB error:(NSError **)error {
     if (_frameCount == 0) {
         if (error) *error = NightscapeError(3, @"合成するフレームがありません");
         return nil;
     }
     const cv::Size size(_width, _height);
+    if (groundRGB && groundRGB.length < (NSUInteger)size.area() * 3 * sizeof(uint16_t)) {
+        if (error) *error = NightscapeError(1, @"地上固定フレームの画素データが不正です");
+        return nil;
+    }
     const cv::Mat alpha(size, CV_32F, (void *)_mask.skyAlpha.bytes);
     const int longSide = std::max(_width, _height);
 
@@ -933,6 +941,15 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     // 光害フレーム: 地上に合わせた層の空（動く星は外れ値として除かれている）。星と地上の動きの差が小さいと
     // 星が短い線として残るため、明るく細い構造を取り除いて、なだらかな光害・地平線の明るさだけにする
     const cv::Mat lightPollution = RemoveBrightThinStructures(ground, 2 * starSize + 1);
+
+    // 地上固定フレームを使うときは、地上をそのフレームにする（各層は地上固定フレームの座標で作ってある）。
+    // 光害フレームは Light を地上に合わせた層のまま使う。Light に写っていない所（端）は地上固定フレームで埋める
+    if (groundRGB) {
+        cv::Mat fixedGround;
+        cv::Mat(size, CV_16UC3, (void *)groundRGB.bytes).convertTo(fixedGround, CV_32FC3);
+        fixedGround.copyTo(sky, ~hasSky & ~hasGround);
+        ground = fixedGround;
+    }
     // 光害フレームを重ねる強さ: 地上との境界で1、空の奥へ向かってなだらかに0へ
     const cv::Mat lightPollutionWeight = LightPollutionWeight(alpha);
 

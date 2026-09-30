@@ -243,7 +243,8 @@ public class CanvasViewController: NSViewController {
             displayImg = previewImage(for: preview, autoStretch: state.enableAutoStretch)
             fileNameLabel.stringValue = isPreviewLoading ? "\(preview.name)（読み込み中…）" : preview.name
             fileNameLabel.textColor = .secondaryLabelColor
-        } else if let base = state.baseImage {
+        } else if let base = state.nightscapeReferenceImage {
+            // 地上固定フレームを使う新星景モードでは、判定結果（マスク）の構図の地上固定フレームを表示する
             displayImg = previewImage(for: base, autoStretch: state.enableAutoStretch)
             fileNameLabel.stringValue = isPreviewLoading ? "\(base.name)（読み込み中…）" : base.name
             fileNameLabel.textColor = .secondaryLabelColor
