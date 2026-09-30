@@ -85,17 +85,24 @@ cp -R "$APP_DIR" "$DMG_STAGING/"
 # Create symlink to /Applications
 ln -s /Applications "$DMG_STAGING/Applications"
 
+# かんたんインストーラ（コピー・Gatekeeperの解除・初回起動を行うAppleScript）
+osacompile -o "$DMG_STAGING/かんたんインストーラ.scpt" "$PROJ_DIR/../scripts/かんたんインストーラ.applescript"
+
 # Create README note for DMG
 cat << EOF > "$DMG_STAGING/はじめにお読みください.txt"
 MacStarStacker インストール＆初回起動ガイド
 =============================================
 
-【インストール方法】
-1. 「MacStarStacker.app」を「Applications」フォルダへドラッグ＆ドロップしてください。
+【かんたんインストール（おすすめ）】
+1. 「かんたんインストーラ.scpt」をダブルクリックして開きます（スクリプトエディタが開きます）。
+2. ウインドウ上部の ▶（実行）ボタンを押し、「インストール」を選んでください。
+   「アプリケーション」フォルダへのコピー、初回起動の確認（Gatekeeper）の解除、起動までを行います。
+   「アプリケーション」フォルダに書き込めないときは、管理者のパスワードを求められます。
 
-【初回起動時の注意】
-本ビルドはAppleのDeveloper IDでは署名・公証されていません。
-警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
+【手動でインストールする場合】
+1. 「MacStarStacker.app」を「Applications」フォルダへドラッグ＆ドロップしてください。
+2. 本ビルドはAppleのDeveloper IDでは署名・公証されていません。
+   初回起動で警告が出た場合は「MacStarStacker.app」を右クリックし、「開く」を選択してください。
 
 対応OS: macOS 14 (Sonoma) 以降
 収録アーキテクチャ: Universal（Apple Silicon / Intel のどちらでもネイティブ動作）
