@@ -171,8 +171,8 @@ final class StackingPipelineTests: XCTestCase {
         // 自動判定の結果がブラシで直せるマスクとして表示される（上は空=青、下は地上=緑）
         let overlay = try XCTUnwrap(state.maskBitmap)
         let hints = try XCTUnwrap(NightscapeCompositor.hints(from: overlay, width: 480, height: 320))
-        XCTAssertEqual(hints[20 * 480 + 240], 1, "上は空")
-        XCTAssertEqual(hints[300 * 480 + 240], 2, "下は地上")
+        XCTAssertEqual(hints[20 * 480 + 240], 3, "上は空（前回の自動判定）")
+        XCTAssertEqual(hints[300 * 480 + 240], 4, "下は地上（前回の自動判定）")
     }
 }
 

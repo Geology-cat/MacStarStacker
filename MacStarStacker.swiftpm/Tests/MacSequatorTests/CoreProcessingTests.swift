@@ -283,7 +283,15 @@ final class CoreProcessingTests: XCTestCase {
         let bytes = rgbaBytes(try XCTUnwrap(try XCTUnwrap(state.maskBitmap).cgImage(forProposedRect: nil, context: nil, hints: nil)))
         let painted = Array(bytes[(80 * 100 + 30) * 4..<(80 * 100 + 30) * 4 + 4])
         let detected = Array(bytes[(80 * 100 + 70) * 4..<(80 * 100 + 70) * 4 + 4])
-        XCTAssertEqual(painted, detected, "自動判定で地上になった所を地上のブラシで塗っても色が変わらない")
+        for channel in 0..<4 {
+            XCTAssertLessThanOrEqual(abs(Int(painted[channel]) - Int(detected[channel])), 6,
+                                     "自動判定で地上になった所を地上のブラシで塗っても色が（見た目で）変わらない")
+        }
+        // 見た目は同じでも、ブラシで塗った所と前回の自動判定の結果は区別できる（ブラシを優先するため）
+        let hints = try XCTUnwrap(NightscapeCompositor.hints(from: try XCTUnwrap(state.maskBitmap), width: 100, height: 100))
+        XCTAssertEqual(hints[80 * 100 + 30], 2, "ブラシの地上")
+        XCTAssertEqual(hints[80 * 100 + 70], 4, "前回の自動判定の地上")
+        XCTAssertEqual(hints[20 * 100 + 50], 3, "前回の自動判定の空")
     }
 
     func testMaskOverlayFadesAcrossTheFeatherRadius() throws {
@@ -307,7 +315,7 @@ final class CoreProcessingTests: XCTestCase {
         }
         // ぼかしなし: 地上の中はそのままの濃さ、境界の外（空）は空の色
         XCTAssertEqual(try groundAt(60), 255)
-        XCTAssertEqual(try groundAt(115), 0)
+        XCTAssertLessThanOrEqual(try groundAt(115), 6, "（自動判定の塗りは不透明度250なので青は250）")
         // 境界ぼかし 10px: 境界を越えてなだらかに薄くなる
         canvas.maskFeatherRadius = 10
         XCTAssertGreaterThan(try groundAt(40), 240, "境界から離れた所は濃いまま")
