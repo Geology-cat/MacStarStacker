@@ -189,7 +189,7 @@ final class DocumentationScreenshotTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "MacStarStacker - 星景写真スタッキング"
-        window.appearance = NSAppearance(named: .darkAqua)
+        if #available(macOS 10.14, *) { window.appearance = NSAppearance(named: .darkAqua) }
         window.isReleasedWhenClosed = false
         let split = MainSplitViewController()
         window.contentViewController = split
@@ -440,7 +440,7 @@ final class DocumentationScreenshotTests: XCTestCase {
         if !reviewItems.isEmpty {
             let review = TrailReviewViewController(items: reviewItems)
             let reviewWindow = review.makeReviewWindow()
-            reviewWindow.appearance = NSAppearance(named: .darkAqua)
+            if #available(macOS 10.14, *) { reviewWindow.appearance = NSAppearance(named: .darkAqua) }
             reviewWindow.setContentSize(NSSize(width: 1000, height: 640))
             settle(1)
             let reviewView = review.view
