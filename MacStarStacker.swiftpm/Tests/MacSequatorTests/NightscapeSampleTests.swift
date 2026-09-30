@@ -5,7 +5,7 @@ import OpenCVWrapper
 
 /// 実際の撮影データで新星景モードを試す（手動確認用）。
 /// 環境変数 NIGHTSCAPE_SAMPLE_DIR に RAW のフォルダ、NIGHTSCAPE_OUTPUT_DIR に書き出し先を指定したときだけ実行する。
-/// NIGHTSCAPE_BASE_INDEX で基準画像の番号（0始まり）を指定できる。
+/// NIGHTSCAPE_BASE_INDEX で基準画像の番号（0始まり）、NIGHTSCAPE_HINTS で判定の手がかりのマスク画像を指定できる。
 final class NightscapeSampleTests: XCTestCase {
     func testComposeSampleFolder() throws {
         let environment = ProcessInfo.processInfo.environment
@@ -20,9 +20,11 @@ final class NightscapeSampleTests: XCTestCase {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let baseIndex = Int(environment["NIGHTSCAPE_BASE_INDEX"] ?? "") ?? lights.count / 2
 
+        // NIGHTSCAPE_HINTS に、ブラシと同じ色（空=青、地上=緑）で塗ったマスク画像を指定できる
+        let hints = environment["NIGHTSCAPE_HINTS"].flatMap { NSImage(contentsOfFile: $0) }
         let input = RawStackPipeline.Input(
             lights: lights, baseIndex: baseIndex, darks: [], flats: [], biases: [], mode: .average, align: true,
-            skyGroundMask: nil, maskFeatherRadius: 0, trailMasks: [:], nightscape: true
+            skyGroundMask: hints, maskFeatherRadius: 0, trailMasks: [:], nightscape: true
         )
         let start = Date()
         let result = try XCTUnwrap(RawStackPipeline.stack(input) { fraction, status in
