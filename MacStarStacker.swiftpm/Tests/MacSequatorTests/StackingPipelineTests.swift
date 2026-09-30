@@ -336,6 +336,28 @@ extension StackingPipelineTests {
         XCTAssertFalse(state.stackingStatus.contains("地上固定フレーム"), state.stackingStatus)
     }
 
+    /// ブラシで広めに塗り直した所は、色が反対側に似ていても、ほとんどが塗った側になる（縁だけ輪郭に合わせる）
+    func testBroadUserStrokeWinsOverColor() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = try writeNightscapeFrames(to: directory, count: 6)
+        let width = 480, height = 320
+        let frames = try files.map { try XCTUnwrap(NightscapeCompositor.rgb16(from: try XCTUnwrap(ImageLoader.load(from: $0.url)))) }
+        // 地上（岩肌）の中を、幅40・高さ24の長方形で空として塗る
+        var hints = [UInt8](repeating: 0, count: width * height)
+        let rect = (x: 200..<240, y: 250..<274)
+        for y in rect.y { for x in rect.x { hints[y * width + x] = 1 } }
+        let analysis = try NightscapeCompositor.analyze(
+            frameCount: frames.count, baseIndex: 0, width: width, height: height, hints: Data(hints),
+            loadFrame: { frames[$0].pixels }, progress: { _, _ in })
+        let alpha = try XCTUnwrap(analysis.detectedSkyAlpha)
+        var sky = 0
+        for y in rect.y { for x in rect.x where alpha[y * width + x] >= 0.5 { sky += 1 } }
+        XCTAssertGreaterThan(Double(sky) / Double(rect.x.count * rect.y.count), 0.45, "塗った所のほとんどが空になっていない")
+        XCTAssertLessThan(alpha[300 * width + 100], 0.5, "塗っていない地上は地上のまま")
+    }
+
     private func writeNightscapeFramesForAnalysis(to directory: URL) throws -> [ImageFile] {
         try writeNightscapeFrames(to: directory, count: 6)
     }
