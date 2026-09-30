@@ -65,6 +65,11 @@ public class SettingsViewController: NSViewController {
     private let stackModePopup = NSPopUpButton()
     private let alignCheckbox = NSButton(checkboxWithTitle: "アライメント (星の位置合わせ)", target: nil, action: nil)
     private let trailRemovalCheckbox = NSButton(checkboxWithTitle: "✈️ 飛行機・人工衛星の光跡を除去", target: nil, action: nil)
+    /// 平均のシグマクリッピング（外れ値を除いて平均）と、その κ（下側・上側）
+    private let sigmaClipCheckbox = NSButton(checkboxWithTitle: "シグマクリッピング（外れ値を除いて平均）", target: nil, action: nil)
+    private let sigmaKappaRow = NSStackView()
+    private let sigmaLowField = NSTextField()
+    private let sigmaHighField = NSTextField()
     private let analyzeTrailsButton = NSButton()
     private let trailStatusBadge = NSTextField(labelWithString: "")
     private let skyGroundMaskCheckbox = NSButton(
@@ -239,6 +244,12 @@ public class SettingsViewController: NSViewController {
         alignCheckbox.target = self
         alignCheckbox.action = #selector(onAlignToggled)
 
+        sigmaClipCheckbox.translatesAutoresizingMaskIntoConstraints = false
+        sigmaClipCheckbox.font = NSFont.systemFont(ofSize: 11)
+        sigmaClipCheckbox.target = self
+        sigmaClipCheckbox.action = #selector(onSigmaClipToggled)
+        configureSigmaKappaRow()
+
         trailRemovalCheckbox.translatesAutoresizingMaskIntoConstraints = false
         trailRemovalCheckbox.title = "✈️ 飛行機・人工衛星の光跡を除去"
         trailRemovalCheckbox.font = NSFont.systemFont(ofSize: 11)
@@ -259,8 +270,9 @@ public class SettingsViewController: NSViewController {
 
         // 光跡除去の項目は比較明合成のときだけ表示する。非表示の間は場所を取らないよう縦のスタックに並べる
         let methodRows = makeRowStack(
-            [stackModePopup, alignCheckbox, trailRemovalCheckbox, analyzeTrailsButton, trailStatusBadge],
-            spacings: [8, 8, 6, 4]
+            [stackModePopup, alignCheckbox, sigmaClipCheckbox, sigmaKappaRow, trailRemovalCheckbox, analyzeTrailsButton,
+             trailStatusBadge],
+            spacings: [8, 6, 4, 8, 6, 4]
         )
         pin(methodRows, to: methodCard.container)
         analyzeTrailsButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
@@ -732,6 +744,42 @@ public class SettingsViewController: NSViewController {
 
     /// 行を縦に並べるスタックビュー。非表示にした行は場所を取らない（余白が残らない）。
     /// spacings[i] は rows[i] と次の行の間隔。
+    /// シグマクリッピングの κ（下側・上側）を入力する行
+    private func configureSigmaKappaRow() {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.minimumFractionDigits = 1
+        formatter.maximumFractionDigits = 1
+        formatter.minimum = NSNumber(value: SigmaClipping.range.lowerBound)
+        formatter.maximum = NSNumber(value: SigmaClipping.range.upperBound)
+        func label(_ text: String) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.font = NSFont.systemFont(ofSize: 10)
+            field.textColor = .secondaryLabelColor
+            return field
+        }
+        for (field, identifier, tip) in [
+            (sigmaLowField, "SigmaLowField", "平均より暗い側の外れ値を除く幅（標準偏差の何倍）。数値を入力して Return で確定します"),
+            (sigmaHighField, "SigmaHighField", "平均より明るい側の外れ値（飛行機・人工衛星など）を除く幅（標準偏差の何倍）。数値を入力して Return で確定します"),
+        ] {
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            field.alignment = .right
+            field.formatter = formatter
+            field.target = self
+            field.action = #selector(onSigmaKappaChanged)
+            field.cell?.sendsActionOnEndEditing = true
+            field.toolTip = tip
+            field.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        }
+        sigmaKappaRow.orientation = .horizontal
+        sigmaKappaRow.spacing = 4
+        sigmaKappaRow.alignment = .centerY
+        sigmaKappaRow.setViews([label("κ 下側"), sigmaLowField, label("上側"), sigmaHighField], in: .leading)
+        sigmaKappaRow.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+    }
+
     private func makeRowStack(_ rows: [NSView], spacings: [CGFloat]) -> NSStackView {
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
@@ -829,6 +877,17 @@ public class SettingsViewController: NSViewController {
             : (isCompareBright
                 ? "ONにすると星の位置を合わせて合成します（星は軌跡ではなく点になります）"
                 : "星の位置を合わせて合成します")
+        // シグマクリッピングは平均のとき。新星景モードでは外れ値（動く星など）を必ず除くため常にON（κ は変えられる）
+        let showsSigmaClipping = state.stackMode == "Average" || nightscape
+        sigmaClipCheckbox.isHidden = !showsSigmaClipping
+        sigmaClipCheckbox.state = (nightscape || state.enableSigmaClipping) ? .on : .off
+        sigmaClipCheckbox.isEnabled = !nightscape
+        sigmaClipCheckbox.toolTip = nightscape
+            ? "新星景モードでは、動く星や飛行機などの外れ値を常に除いて合成します（κ は変更できます）"
+            : "画素ごとに、中央値とばらつきから外れた値（飛行機・人工衛星・ホットピクセルなど）を除いてから平均します。全フレームを保持するため、中央値と同じだけメモリを使います"
+        sigmaKappaRow.isHidden = !(showsSigmaClipping && (nightscape || state.enableSigmaClipping))
+        if sigmaLowField.currentEditor() == nil { sigmaLowField.floatValue = state.sigmaClipping.low }
+        if sigmaHighField.currentEditor() == nil { sigmaHighField.floatValue = state.sigmaClipping.high }
         trailRemovalCheckbox.isHidden = !isCompareBright
         trailRemovalCheckbox.state = state.enableTrailRemoval ? .on : .off
 
@@ -994,6 +1053,20 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onTrailRemovalToggled() {
         StackingStateController.shared.enableTrailRemoval = (trailRemovalCheckbox.state == .on)
+    }
+
+    @objc private func onSigmaClipToggled() {
+        StackingStateController.shared.enableSigmaClipping = (sigmaClipCheckbox.state == .on)
+    }
+
+    @objc private func onSigmaKappaChanged() {
+        let range = SigmaClipping.range
+        var clipping = StackingStateController.shared.sigmaClipping
+        clipping.low = min(range.upperBound, max(range.lowerBound, sigmaLowField.floatValue))
+        clipping.high = min(range.upperBound, max(range.lowerBound, sigmaHighField.floatValue))
+        StackingStateController.shared.sigmaClipping = clipping
+        sigmaLowField.floatValue = clipping.low
+        sigmaHighField.floatValue = clipping.high
     }
 
     @objc private func onAnalyzeTrailsClicked() {

@@ -92,6 +92,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) NSInteger frameCount;
 
+/// 外れ値とみなす幅（中央値から、ばらつきの何倍離れたら除くか）。下側（暗い側）・上側（明るい側）。既定は3
+@property (nonatomic) double rejectionLowSigma;
+@property (nonatomic) double rejectionHighSigma;
+
 @end
 
 NS_ASSUME_NONNULL_END
