@@ -33,6 +33,9 @@ typedef struct {
     double cameraMultipliers[3];
     char make[64];
     char model[128];
+    /// LRDemosaicCameraRGB の出力の黒レベル（台）と飽和値（出力の値）。それ以外では0
+    double outputBlack;
+    double outputWhite;
 } LRRawInfo;
 
 /// 撮影情報（EXIF相当）。取得できない項目は0または空文字。

@@ -72,12 +72,14 @@ public enum DNGWriter {
     /// カメラ色空間のままデモザイクして合成した16bitリニアRGBをDNGに書き出す。
     /// - Parameters:
     ///   - pixels: RGBインターリーブ（黒レベル除去済み、ホワイトバランスなし、width * height * 3 要素）
+    ///   - blackLevel: 黒レベル（黒より暗いノイズを残すための台）
     ///   - whiteLevel: センサーの飽和に相当する値（LibRawの出力は65535より低くなる）
     ///   - previewSource: サムネイル・プレビュー用の現像済み画像（センサーの向きのまま、回転しない）
     static func writeCameraRGB(
         pixels: [UInt16],
         width: Int,
         height: Int,
+        blackLevel: Double = 0,
         whiteLevel: Double = 65535,
         camera: CameraColorProfile,
         previewSource: CGImage,
@@ -86,7 +88,8 @@ public enum DNGWriter {
         to url: URL
     ) throws {
         precondition(pixels.count == width * height * 3, "カメラRGBの画素数が一致しません")
-        let main = MainImage(kind: .cameraRGB(camera, whiteLevel: whiteLevel), data: littleEndianData(pixels), width: width, height: height)
+        let main = MainImage(kind: .cameraRGB(camera, blackLevel: blackLevel, whiteLevel: whiteLevel),
+                             data: littleEndianData(pixels), width: width, height: height)
         try writeDNG(main: main, previewSource: previewSource, metadata: metadata, embedLensProfile: embedLensProfile, to: url)
     }
 
@@ -167,7 +170,7 @@ public enum DNGWriter {
         /// ベイヤー配列の生データ
         case bayer(BayerMosaic, CameraColorProfile)
         /// カメラ色空間のままデモザイクしたリニアRGB
-        case cameraRGB(CameraColorProfile, whiteLevel: Double)
+        case cameraRGB(CameraColorProfile, blackLevel: Double, whiteLevel: Double)
 
         var samplesPerPixel: Int {
             if case .bayer = self { return 1 }
@@ -177,7 +180,7 @@ public enum DNGWriter {
         var camera: CameraColorProfile? {
             switch self {
             case .linearSRGB: return nil
-            case .bayer(_, let camera), .cameraRGB(let camera, _): return camera
+            case .bayer(_, let camera), .cameraRGB(let camera, _, _): return camera
             }
         }
     }
@@ -442,15 +445,16 @@ public enum DNGWriter {
             ]
             switch main.kind {
             case .linearSRGB, .cameraRGB:
-                var white: UInt16 = 65535
-                if case .cameraRGB(_, let whiteLevel) = main.kind {
+                var white: UInt16 = 65535, black: UInt16 = 0
+                if case .cameraRGB(_, let blackLevel, let whiteLevel) = main.kind {
                     white = UInt16(clamping: Int(whiteLevel.rounded()))
+                    black = UInt16(clamping: Int(blackLevel.rounded()))
                 }
                 rawTags += [
                     shortTag(258, [16, 16, 16]),                                          // BitsPerSample
                     shortTag(262, [34892]),                                               // PhotometricInterpretation: LinearRaw
                     shortTag(277, [3]),                                                   // SamplesPerPixel
-                    shortTag(0xC61A, [0, 0, 0]),                                          // BlackLevel
+                    shortTag(0xC61A, [black, black, black]),                              // BlackLevel
                     shortTag(0xC61D, [white, white, white]),                              // WhiteLevel
                 ]
             case .bayer(let mosaic, _):

@@ -64,20 +64,17 @@ struct BayerFrame {
     var pixels: [UInt16]
 }
 
-/// カメラ色空間のままデモザイクした16bitリニアRGB（黒レベル除去済み、白=65535、ホワイトバランスなし）
+/// カメラ色空間のままデモザイクした16bitリニアRGB（ホワイトバランスなし）。
+/// 黒より暗いノイズを切り捨てないよう、センサーの黒レベルを引いた値に小さな台（blackLevel）を足してある
 struct CameraRGBFrame {
     let info: RawSensorInfo
     let width: Int
     let height: Int
     var pixels: [UInt16]
-
-    /// センサー飽和に相当する出力値。LibRawは黒レベルを引いた値を「白レベル」で割って65535倍するため、
-    /// 実際の飽和は 65535 × (白 − 黒) ÷ 白 になる（DNGのWhiteLevelに書く）。
-    var whiteLevel: Double {
-        let black = info.blackLevels.reduce(0, +) / Double(max(1, info.blackLevels.count))
-        guard info.whiteLevel > black else { return 65535 }
-        return 65535.0 * (info.whiteLevel - black) / info.whiteLevel
-    }
+    /// 出力の黒レベル（台）。DNGのBlackLevelに書く
+    let blackLevel: Double
+    /// センサー飽和に相当する出力値。DNGのWhiteLevelに書く
+    let whiteLevel: Double
 }
 
 enum RawDecoder {
@@ -139,7 +136,8 @@ enum RawDecoder {
         defer { LRFree(output) }
         let count = Int(width) * Int(height) * 3
         let pixels = Array(UnsafeBufferPointer(start: output, count: count))
-        return CameraRGBFrame(info: RawSensorInfo(info), width: Int(width), height: Int(height), pixels: pixels)
+        return CameraRGBFrame(info: RawSensorInfo(info), width: Int(width), height: Int(height), pixels: pixels,
+                              blackLevel: info.outputBlack, whiteLevel: info.outputWhite > 0 ? info.outputWhite : 65535)
     }
 
     /// 撮影時ホワイトバランス・sRGBで現像した16bit RGB（センサーの向き）を CGImage として返す。
