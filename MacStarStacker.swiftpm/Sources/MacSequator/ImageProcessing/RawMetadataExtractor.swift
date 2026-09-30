@@ -41,6 +41,17 @@ public struct RawMetadataInfo: Sendable {
     public init() {}
     
     /// レンズ情報のフォーマットされた表示名（例: "Sony FE 20mm F1.8 G (20mm, f/1.8)"）
+    /// カメラの名前。機種名がメーカー名（の最初の語）で始まっていれば（Canon の「Canon EOS 6D」、
+    /// NIKON CORPORATION の「NIKON Z 6_2」など）メーカー名を重ねない
+    public var cameraDisplayName: String {
+        let make = cameraMake.trimmingCharacters(in: .whitespaces)
+        let model = cameraModel.trimmingCharacters(in: .whitespaces)
+        if make.isEmpty { return model }
+        if model.isEmpty { return make }
+        let brand = make.split(separator: " ").first.map(String.init) ?? make
+        return model.lowercased().hasPrefix(brand.lowercased()) ? model : "\(make) \(model)"
+    }
+
     public var displayName: String {
         var parts: [String] = []
         if !lensModel.isEmpty {
