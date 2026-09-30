@@ -1,0 +1,9 @@
+# LaTeX の途中のファイル（PDF は docs/ に書き出したものを管理する）
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+manual.pdf

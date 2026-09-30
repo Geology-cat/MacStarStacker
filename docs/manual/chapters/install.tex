@@ -1,0 +1,112 @@
+\clearpage
+\section{インストール}
+
+\subsection{DMG をダウンロードして開く}
+
+\begin{steps}
+  \item GitHub のリリースのページ（\url{https://github.com/Geology-cat/MacStarStacker/releases}）から、お使いの Mac に合った DMG ファイルをダウンロードします（どちらを選ぶかは\pageref{sec:requirements}ページの「動作環境」を見てください）。
+  \item ダウンロードした DMG ファイルをダブルクリックします。次のようなウインドウが開きます。
+\end{steps}
+
+\begin{figure}[H]
+\centering
+\installshot{install_dmg}{0.9\linewidth}{
+  \labelat{app}{-90}{1.3}{アプリ本体}
+  \labelat{guide}{-90}{1.5}{このガイド}
+  \labelat{installer}{-90}{1.3}{かんたんインストーラ}
+  \labelat{readme}{-90}{1.4}{はじめに読む説明}
+}
+\caption{DMG を開いたところ}
+\end{figure}
+
+\subsection{かんたんインストーラでインストールする（おすすめ）}
+
+「かんたんインストーラ」は、次の3つをまとめて行います。
+\begin{enumerate}[label=(\arabic*),itemsep=0.2ex]
+  \item MacStarStacker を「アプリケーション」フォルダへコピーする
+  \item 初回起動の確認（Gatekeeper）を解除する
+  \item MacStarStacker を起動する
+\end{enumerate}
+
+\begin{steps}
+  \item DMG の中の\ui{かんたんインストーラ.scpt}をダブルクリックします。「スクリプトエディタ」が開きます。
+  \item ウインドウの上にある\ui{▶}（実行）ボタンを押します。
+\end{steps}
+
+\begin{figure}[H]
+\centering
+\installshot{install_script}{0.8\linewidth}{
+  \markbox{run}
+  \callout{1}{run}{-150}{1.8}
+}
+\caption{スクリプトエディタで開いたところ。\num{1}の ▶（実行）を押します}
+\end{figure}
+
+\begin{steps}[resume]
+  \item 確認のメッセージが出たら\ui{インストール}を押します。
+\end{steps}
+
+\begin{figure}[H]
+\centering
+\installshot{install_dialog}{0.55\linewidth}{
+  \markbox{install}
+  \callout{1}{install}{-60}{1.3}
+}
+\caption{インストールの確認。\num{1}の\ui{インストール}を押します}
+\end{figure}
+
+\begin{steps}[resume]
+  \item 「アプリケーション」フォルダに書き込むのに管理者の許可が必要なときは、パスワードを聞かれます。Mac にログインするときのパスワードを入れてください。
+  \item しばらくすると MacStarStacker が起動し、「インストールが終わり、MacStarStacker を起動しました。」と表示されます。これで完了です。DMG は取り出してかまいません（Finder のサイドバーの「MacStarStacker」の横にある取り出しボタンを押します）。
+\end{steps}
+
+\begin{memo}[新しい版に入れ替えるとき]
+すでに MacStarStacker が入っていても、同じ手順でかまいません。古いものを終了させてから、新しいものに置き換えます。
+\end{memo}
+
+\subsection{手動でインストールする}\label{sec:install-manual}
+
+かんたんインストーラを使わない場合は、次のようにします。
+
+\begin{steps}
+  \item DMG のウインドウで、\ui{MacStarStacker.app}を\ui{Applications}のフォルダへドラッグします。
+  \item 「アプリケーション」フォルダの MacStarStacker を開きます。
+\end{steps}
+
+MacStarStacker は Apple の Developer ID による署名・公証をしていないため、初めて開くときに macOS が確認のメッセージを出し、そのままでは開けません。次の手順で開いてください（2回目からはふつうに開けます）。
+
+\paragraph{macOS 15 (Sequoia) 以降}
+\begin{steps}
+  \item 「“MacStarStacker.app”は開いていません」というメッセージが出たら、\ui{完了}を押して閉じます（\ui{ゴミ箱に入れる}は押さないでください）。
+  \item アップルメニュー \menu{→ システム設定 → プライバシーとセキュリティ}を開きます。
+  \item 下の方の「セキュリティ」の欄に「“MacStarStacker”は…ブロックされました」と出ているので、\ui{このまま開く}を押します。
+  \item パスワードを入れ、もう一度出るメッセージで\ui{開く}を押します。
+\end{steps}
+
+\begin{figure}[H]
+\centering
+\installshot{install_blocked}{0.34\linewidth}{
+  \markbox{done}
+  \callout{1}{done}{-90}{1.2}
+}
+\caption{初めて開いたときのメッセージ（macOS 15）。\num{1}の\ui{完了}を押して閉じます}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\installshot{install_gatekeeper}{0.75\linewidth}{
+  \markbox{openanyway}
+  \calloutright{1}{openanyway}
+}
+\caption{システム設定の「プライバシーとセキュリティ」の下の方。\num{1}の\ui{このまま開く}を押します}
+\end{figure}
+
+\paragraph{macOS 14 (Sonoma) 以前}
+\begin{steps}
+  \item 「アプリケーション」フォルダの MacStarStacker を、\key{control}キーを押しながらクリック（または右クリック）します。
+  \item 出てきたメニューから\ui{開く}を選び、メッセージでもう一度\ui{開く}を押します。
+\end{steps}
+
+\subsection{アンインストール（削除）}
+
+「アプリケーション」フォルダの MacStarStacker をゴミ箱に入れるだけです（ウインドウの位置などの小さな設定が残るだけで、ほかに消すものはありません）。

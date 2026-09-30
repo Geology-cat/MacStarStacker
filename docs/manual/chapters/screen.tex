@@ -1,0 +1,48 @@
+\clearpage
+\section{画面の見方}\label{sec:screen}
+
+MacStarStacker を起動すると、次のような画面が開きます。画面は左・中央・右の3つに分かれています。
+
+\begin{figure}[H]
+\centering
+\begin{screenshot}{main_loaded}
+  \calloutabove{1}{filelist}
+  \calloutabove{2}{canvas}
+  \calloutabove{3}{settings}
+  \calloutleft{4}{base}
+  \calloutleft{5}{star}
+  \markbox{start}
+  \calloutright{6}{start}
+\end{screenshot}
+\caption{MacStarStacker の画面（写真を読み込んだところ）}
+\end{figure}
+
+\begin{callouts}
+\co{1} \textbf{ファイルリスト}：読み込んだ写真の一覧です。Light・Dark・Flat・Bias の種類ごとに分かれています（\ref{sec:filelist}節）。
+\co{2} \textbf{プレビュー}：選んだ写真や、合成した結果を大きく表示します。新星景モードでは、ここで空と地上をブラシで塗り分けます（\ref{sec:preview}節）。
+\co{3} \textbf{設定}：合成のしかた、書き出す形式などを選びます。上のタブで\ui{スタック}と\ui{タイムラプス}を切り替えます（\ref{sec:stacking}節）。
+\co{4} \textbf{基準画像}：いま基準になっている写真の名前と、撮影の情報（レンズ・焦点距離・F値・ISO・露出時間）です。
+\co{5} \ui{★}：押した写真が基準画像になります。黄色の★が基準画像です。
+\co{6} \ui{★ スタッキング開始}：合成を始めます。
+\end{callouts}
+
+\subsection{メニューとキーボードショートカット}
+
+よく使う操作は、メニューやキーボードからも行えます。
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+メニュー & キー & はたらき \\
+\midrule
+ファイル → Light 画像を追加… & \key{⌘}\,\key{O} & Light の写真を選んで読み込みます。 \\
+ファイル → スタック結果を書き出す… & \key{⌘}\,\key{S} & 合成した結果をファイルに保存します。 \\
+編集 → 取り消す & \key{⌘}\,\key{Z} & 写真の追加・削除を1つ前に戻します。 \\
+編集 → マスクをクリア & \key{⌘}\,\key{K} & ブラシで塗ったマスクを消します。 \\
+編集 → すべてクリア… & & 写真・結果・マスク・設定をすべて消して、起動した直後に戻します。 \\
+処理 → スタッキング開始 & \key{⌘}\,\key{R} & 合成を始めます。 \\
+MacStarStacker → 終了 & \key{⌘}\,\key{Q} & アプリを終了します。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
