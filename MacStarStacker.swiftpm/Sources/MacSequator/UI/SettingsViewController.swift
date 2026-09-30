@@ -850,7 +850,7 @@ public class SettingsViewController: NSViewController {
 
         // レンズ情報更新
         if let meta = state.baseImageMetadata {
-            lensInfoCameraLabel.stringValue = "\(meta.cameraMake) \(meta.cameraModel)"
+            lensInfoCameraLabel.stringValue = meta.cameraDisplayName
             lensInfoLensLabel.stringValue = meta.lensModel.isEmpty ? "レンズ: (自動検出待ち / 不明)" : meta.lensModel
 
             var params: [String] = []
