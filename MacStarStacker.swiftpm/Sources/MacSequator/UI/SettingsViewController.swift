@@ -74,6 +74,10 @@ public class SettingsViewController: NSViewController {
     )
     /// 新星景モード・比較明でのマスクの使い方の説明
     private let skyGroundHintLabel = NSTextField(wrappingLabelWithString: "")
+    /// 新星景モードで空と地上を自動判定し直すボタン（比較明では高さを0にして隠す）
+    private let analyzeNightscapeButton = NSButton()
+    private var analyzeNightscapeButtonHeight: NSLayoutConstraint?
+    private var analyzeNightscapeButtonSpacing: NSLayoutConstraint?
     private let brushModeSegmented = NSSegmentedControl()
     private let brushSizeSlider = NSSlider(value: 20, minValue: 5, maxValue: 150, target: nil, action: nil)
     private let brushSizeLabel = NSTextField(labelWithString: "20 px")
@@ -273,6 +277,13 @@ public class SettingsViewController: NSViewController {
         skyGroundHintLabel.font = NSFont.systemFont(ofSize: 10)
         skyGroundHintLabel.textColor = .secondaryLabelColor
 
+        analyzeNightscapeButton.translatesAutoresizingMaskIntoConstraints = false
+        analyzeNightscapeButton.bezelStyle = .roundRect
+        analyzeNightscapeButton.font = NSFont.systemFont(ofSize: 11)
+        analyzeNightscapeButton.target = self
+        analyzeNightscapeButton.action = #selector(onAnalyzeNightscapeClicked)
+        analyzeNightscapeButton.toolTip = "全フレームを位置合わせして空と地上を自動で判定し直します（ブラシで塗った所は残ります）"
+
         brushModeSegmented.translatesAutoresizingMaskIntoConstraints = false
         brushModeSegmented.segmentCount = 3
         brushModeSegmented.setLabel("空 (青)", forSegment: 0)
@@ -321,6 +332,7 @@ public class SettingsViewController: NSViewController {
 
         maskCard.container.addSubview(skyGroundMaskCheckbox)
         maskCard.container.addSubview(skyGroundHintLabel)
+        maskCard.container.addSubview(analyzeNightscapeButton)
         maskCard.container.addSubview(brushModeSegmented)
         maskCard.container.addSubview(sizeTitle)
         maskCard.container.addSubview(brushSizeSlider)
@@ -339,7 +351,9 @@ public class SettingsViewController: NSViewController {
             skyGroundHintLabel.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             skyGroundHintLabel.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
-            brushModeSegmented.topAnchor.constraint(equalTo: skyGroundHintLabel.bottomAnchor, constant: 6),
+            analyzeNightscapeButton.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
+            analyzeNightscapeButton.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
+            brushModeSegmented.topAnchor.constraint(equalTo: analyzeNightscapeButton.bottomAnchor, constant: 6),
             brushModeSegmented.leadingAnchor.constraint(equalTo: maskCard.container.leadingAnchor),
             brushModeSegmented.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
 
@@ -372,6 +386,12 @@ public class SettingsViewController: NSViewController {
             clearMaskButton.trailingAnchor.constraint(equalTo: maskCard.container.trailingAnchor),
             clearMaskButton.bottomAnchor.constraint(equalTo: maskCard.container.bottomAnchor),
         ])
+
+        let buttonSpacing = analyzeNightscapeButton.topAnchor.constraint(equalTo: skyGroundHintLabel.bottomAnchor, constant: 6)
+        let buttonHeight = analyzeNightscapeButton.heightAnchor.constraint(equalToConstant: 24)
+        NSLayoutConstraint.activate([buttonSpacing, buttonHeight])
+        analyzeNightscapeButtonSpacing = buttonSpacing
+        analyzeNightscapeButtonHeight = buttonHeight
 
         // カード3: レンズプロファイル & カメラ
         let lensCard = SectionCardView(title: "レンズプロファイル")
@@ -822,10 +842,24 @@ public class SettingsViewController: NSViewController {
         skyGroundMaskCheckbox.toolTip = isCompareBright
             ? "塗ったマスクで、空は比較明、地上は平均で合成します"
             : "空は星に、地上は地上に合わせて合成し、空と地上の境界は自動で判定します"
-        skyGroundHintLabel.stringValue = isCompareBright
-            ? "地上を緑、空を青のブラシで塗ってください。"
-            : "空と地上は自動で判定します。合成後に判定結果が表示されるので、違う所だけブラシで塗り直して再度合成できます。"
+        if isCompareBright {
+            skyGroundHintLabel.stringValue = "地上を緑、空を青のブラシで塗ってください。"
+        } else if state.enableSkyGroundMask && !state.nightscapeAnalysisStatus.isEmpty {
+            skyGroundHintLabel.stringValue = state.nightscapeAnalysisStatus
+        } else {
+            skyGroundHintLabel.stringValue = "ONにすると全フレームを解析して空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
+        }
         skyGroundHintLabel.isEnabled = state.enableSkyGroundMask
+        // 自動判定し直すボタン（新星景モードのときだけ表示）
+        let showsAnalyzeButton = !isCompareBright
+        analyzeNightscapeButton.isHidden = !showsAnalyzeButton
+        analyzeNightscapeButtonHeight?.constant = showsAnalyzeButton ? 24 : 0
+        analyzeNightscapeButtonSpacing?.constant = showsAnalyzeButton ? 6 : 0
+        analyzeNightscapeButton.title = state.isAnalyzingNightscape
+            ? "判定中 (\(Int(state.nightscapeAnalysisProgress * 100))%)..."
+            : "空と地上を自動判定し直す"
+        analyzeNightscapeButton.isEnabled = state.isNightscapeActive && !state.isAnalyzingNightscape && !state.isStacking
+            && lightCount >= 2 && state.baseImage != nil
         switch state.brushMode {
         case .sky: brushModeSegmented.selectedSegment = 0
         case .ground: brushModeSegmented.selectedSegment = 1
@@ -959,6 +993,10 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onAnalyzeTrailsClicked() {
         StackingStateController.shared.analyzeTrails()
+    }
+
+    @objc private func onAnalyzeNightscapeClicked() {
+        StackingStateController.shared.analyzeNightscape()
     }
 
     @objc private func onSkyGroundMaskToggled() {

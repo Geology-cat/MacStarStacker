@@ -33,6 +33,8 @@ struct RawStackResult {
     var note: String? = nil
     /// cameraRGB の黒レベル（黒より暗いノイズを残すための台）
     var blackLevel: Double = 0
+    /// 新星景モードの解析の結果（ブラシで直して合成し直すときに使い回す）
+    var nightscape: RawStackPipeline.NightscapePreparation? = nil
 
     var modeDescription: String {
         switch kind {
@@ -114,7 +116,8 @@ enum RawStackPipeline {
     }
 
     /// RAWのまま合成する。RAW経路の対象外（route が nil）の入力では nil を返す。
-    static func stack(_ input: Input, progress: Progress) throws -> RawStackResult? {
+    /// nightscape に同じ入力で解析した結果を渡すと、新星景モードの位置合わせと判定用のデータ集めをやり直さない
+    static func stack(_ input: Input, nightscape prepared: NightscapePreparation? = nil, progress: Progress) throws -> RawStackResult? {
         guard let kind = route(for: input) else { return nil }
         let baseIndex = min(max(0, input.baseIndex), input.lights.count - 1)
         let firstInfo = try RawDecoder.readInfo(from: input.lights[0])
@@ -137,7 +140,8 @@ enum RawStackPipeline {
             result = try stackBayer(input: input, info: info, calibrator: calibrator, pixelCount: pixelCount, progress: progress)
         case .cameraRGB where input.usesNightscape:
             do {
-                result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator, progress: progress)
+                result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator,
+                                             prepared: prepared, progress: progress)
             } catch let error as NightscapeCompositor.CompositorError {
                 // 星・地上の位置合わせができないときは、空と地上を分けずに（位置合わせの設定どおりに）合成する
                 var plain = input
@@ -341,14 +345,55 @@ enum RawStackPipeline {
 
     // MARK: - 新星景モード（空は星に、地上は地上に合わせる）
 
-    private static func stackNightscape(
-        input: Input,
-        baseIndex: Int,
-        info: RawSensorInfo,
-        calibrator: BayerCalibrator,
-        progress: Progress
-    ) throws -> RawStackResult {
-        func demosaic(_ index: Int) throws -> CameraRGBFrame {
+    /// 新星景モードの解析の結果（RAW経路）。同じ入力（Light・基準画像・キャリブレーション）なら合成で使い回す
+    final class NightscapePreparation {
+        let key: String
+        let analysis: NightscapeCompositor.Analysis
+        /// 基準フレーム（センサーの情報・黒レベル・白レベル）
+        let base: CameraRGBFrame
+
+        init(key: String, analysis: NightscapeCompositor.Analysis, base: CameraRGBFrame) {
+            self.key = key
+            self.analysis = analysis
+            self.base = base
+        }
+    }
+
+    /// 解析を使い回せるかの判定に使う、入力の組み合わせ
+    static func nightscapeKey(for input: Input) -> String {
+        let lists = [input.lights, input.darks, input.flats, input.biases].map { $0.map(\.path).joined(separator: "\n") }
+        return (lists + ["base=\(input.baseIndex)"]).joined(separator: "\n--\n")
+    }
+
+    /// 新星景モードの解析だけを行う（合成の前に、自動で判定した空と地上を表示してブラシで直せるようにする）。
+    /// RAW経路の対象外の入力では nil を返す
+    static func prepareNightscape(_ input: Input, isCancelled: @escaping () -> Bool = { false },
+                                  progress: Progress) throws -> NightscapePreparation? {
+        var nightscapeInput = input
+        nightscapeInput.nightscape = true
+        guard nightscapeInput.usesNightscape, route(for: nightscapeInput) == .cameraRGB else { return nil }
+        let baseIndex = min(max(0, input.baseIndex), input.lights.count - 1)
+        let firstInfo = try RawDecoder.readInfo(from: input.lights[0])
+        try checkMemory(frameCount: input.lights.count, info: firstInfo, kind: .cameraRGB, mode: input.mode,
+                        hasSkyGroundMask: input.skyGroundMask != nil, nightscape: true)
+        progress(0.02, "キャリブレーションフレームを構築中...")
+        let info = try RawDecoder.readBayer(from: input.lights[baseIndex]).info
+        let calibrator = BayerCalibrator(info: info, dark: try buildMaster(input.darks), bias: try buildMaster(input.biases),
+                                         flat: try buildMaster(input.flats))
+        do {
+            // ブラシで直している間も解析を持ち続けるため、現像したフレームは保持しない（メモリを抑える）
+            return try analyzeNightscape(input: nightscapeInput, baseIndex: baseIndex, info: info, calibrator: calibrator,
+                                         cacheFrames: false, isCancelled: isCancelled,
+                                         progress: { fraction, status in progress(0.04 + fraction * 0.96, status) })
+        } catch let error as NightscapeCompositor.CompositorError {
+            throw PipelineError(message: error.message)
+        }
+    }
+
+    /// 現像（キャリブレーション込み）したカメラ色空間RGBのフレームを読む
+    private static func cameraRGBLoader(input: Input, info: RawSensorInfo, calibrator: BayerCalibrator)
+        -> (Int) throws -> CameraRGBFrame {
+        { index in
             let url = input.lights[index]
             if calibrator.isIdentity { return try RawDecoder.demosaicCameraRGB(from: url) }
             var bayer = try RawDecoder.readBayer(from: url)
@@ -356,18 +401,30 @@ enum RawStackPipeline {
             calibrator.apply(to: &bayer.pixels)
             return try RawDecoder.demosaicCameraRGB(from: url, replacementBayer: bayer.pixels)
         }
+    }
 
-        progress(0.04, "基準画像を現像中...")
+    private static func analyzeNightscape(
+        input: Input,
+        baseIndex: Int,
+        info: RawSensorInfo,
+        calibrator: BayerCalibrator,
+        cacheFrames allowCache: Bool,
+        isCancelled: () -> Bool = { false },
+        progress: Progress
+    ) throws -> NightscapePreparation {
+        let demosaic = cameraRGBLoader(input: input, info: info, calibrator: calibrator)
+        progress(0.02, "基準画像を現像中...")
         let base = try demosaic(baseIndex)
         let width = base.width, height = base.height
+        // 解析のときの判定には、利用者のブラシだけを手がかりにする（前回の自動判定の結果は使わない）
         let hints = try input.skyGroundMask.flatMap { try nightscapeHints(mask: $0, info: info, width: width, height: height) }
-        // 2回目の読み込み（合成）で現像し直さないよう、メモリに余裕があれば現像したフレームを保持する
+            .flatMap(NightscapeCompositor.userHints)
+        // 合成で現像し直さないよう、メモリに余裕があれば現像したフレームを保持する
         let frameBytes = UInt64(width * height * 3 * MemoryLayout<UInt16>.size)
-        let cacheFrames = UInt64(input.lights.count) * frameBytes <= ProcessInfo.processInfo.physicalMemory / 4
-
-        let outcome = try NightscapeCompositor.compose(
+        let cacheFrames = allowCache && UInt64(input.lights.count) * frameBytes <= ProcessInfo.processInfo.physicalMemory / 4
+        let analysis = try NightscapeCompositor.analyze(
             frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
-            featherRadius: Double(input.nightscapeFeatherRadius), cacheFrames: cacheFrames,
+            cacheFrames: cacheFrames, isCancelled: isCancelled,
             loadFrame: { index in
                 if index == baseIndex { return base.pixels }
                 let frame = try demosaic(index)
@@ -376,7 +433,52 @@ enum RawStackPipeline {
                 }
                 return frame.pixels
             },
-            progress: { fraction, status in progress(0.04 + fraction * 0.86, status) }
+            progress: progress
+        )
+        var baseInfo = base
+        baseInfo.pixels = []  // 画素は解析の結果が保持している
+        return NightscapePreparation(key: nightscapeKey(for: input), analysis: analysis, base: baseInfo)
+    }
+
+    private static func stackNightscape(
+        input: Input,
+        baseIndex: Int,
+        info: RawSensorInfo,
+        calibrator: BayerCalibrator,
+        prepared: NightscapePreparation?,
+        progress: Progress
+    ) throws -> RawStackResult {
+        let demosaic = cameraRGBLoader(input: input, info: info, calibrator: calibrator)
+        // 同じ入力で解析済みなら使い回す（位置合わせと判定用のデータ集めをやり直さない）
+        let preparation: NightscapePreparation
+        let composeStart: Double
+        let reused: Bool
+        if let prepared, prepared.key == nightscapeKey(for: input) {
+            preparation = prepared
+            composeStart = 0.04
+            reused = true
+        } else {
+            preparation = try analyzeNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator,
+                                                cacheFrames: true,
+                                                progress: { fraction, status in progress(0.04 + fraction * 0.43, status) })
+            composeStart = 0.47
+            reused = false
+        }
+        let base = preparation.base
+        let width = base.width, height = base.height
+        // 前回の自動判定の結果（3・4）は、その解析を使い回すときだけ手がかりにする（入力が変わった後の古い結果を使わない）
+        var hints = try input.skyGroundMask.flatMap { try nightscapeHints(mask: $0, info: info, width: width, height: height) }
+        if !reused { hints = hints.flatMap(NightscapeCompositor.userHints) }
+        let outcome = try NightscapeCompositor.compose(
+            analysis: preparation.analysis, hints: hints, featherRadius: Double(input.nightscapeFeatherRadius),
+            loadFrame: { index in
+                let frame = try demosaic(index)
+                guard frame.width == width, frame.height == height else {
+                    throw PipelineError(message: "画像サイズが一致しません: \(input.lights[index].lastPathComponent)")
+                }
+                return frame.pixels
+            },
+            progress: { fraction, status in progress(composeStart + fraction * (0.9 - composeStart), status) }
         )
 
         var note = input.mode == .median ? "新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました" : nil
@@ -394,7 +496,7 @@ enum RawStackPipeline {
                 kind: .cameraRGB, info: base.info, pixels: composited.pixels, width: width, height: height,
                 whiteLevel: base.whiteLevel, baselineExposure: baseline,
                 previewImage: rendered.preview, displayImage: rendered.display,
-                skyAlpha: composited.skyAlpha, note: note, blackLevel: base.blackLevel
+                skyAlpha: composited.skyAlpha, note: note, blackLevel: base.blackLevel, nightscape: preparation
             )
         case .notNeeded(let reason):
             // 空と地上を分ける必要が無い（できない）ときは、星に合わせた通常の合成にする
@@ -404,6 +506,7 @@ enum RawStackPipeline {
             var result = try stackCameraRGB(input: plain, baseIndex: baseIndex, info: info, calibrator: calibrator,
                                             progress: { fraction, status in progress(0.5 + fraction * 0.5, status) })
             result.note = reason
+            result.nightscape = preparation
             return result
         }
     }

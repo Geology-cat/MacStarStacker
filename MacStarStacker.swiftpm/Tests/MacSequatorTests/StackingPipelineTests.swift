@@ -23,7 +23,7 @@ final class StackingPipelineTests: XCTestCase {
         try data.write(to: url)
     }
 
-    private func waitForStacking(_ state: StackingStateController, timeout: TimeInterval = 10) {
+    fileprivate func waitForStacking(_ state: StackingStateController, timeout: TimeInterval = 10) {
         let deadline = Date().addingTimeInterval(timeout)
         while state.isStacking && Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
@@ -86,7 +86,7 @@ final class StackingPipelineTests: XCTestCase {
     }
 
     /// 稜線（y≈200）の下が岩肌の地上、上が星空の画像。星だけが毎フレーム (2, -3) px 動く（固定撮影）
-    private func writeNightscapeFrames(to directory: URL, count: Int) throws -> [ImageFile] {
+    fileprivate func writeNightscapeFrames(to directory: URL, count: Int) throws -> [ImageFile] {
         let width = 480, height = 320
         var random: UInt64 = 17
         func next() -> Double {
@@ -173,6 +173,102 @@ final class StackingPipelineTests: XCTestCase {
         let hints = try XCTUnwrap(NightscapeCompositor.hints(from: overlay, width: 480, height: 320))
         XCTAssertEqual(hints[20 * 480 + 240], 3, "上は空（前回の自動判定）")
         XCTAssertEqual(hints[300 * 480 + 240], 4, "下は地上（前回の自動判定）")
+    }
+}
+
+extension StackingPipelineTests {
+    private func preparedAnalysis(_ state: StackingStateController) -> NightscapeCompositor.Analysis? {
+        switch state.nightscapePrepared {
+        case .developed(_, let analysis)?: return analysis
+        case .raw(let preparation)?: return preparation.analysis
+        case nil: return nil
+        }
+    }
+
+    /// 新しい解析の結果が出るまで待つ（自動解析は少し待ってから始まる）
+    private func waitForNightscapeAnalysis(_ state: StackingStateController, replacing previous: NightscapeCompositor.Analysis?,
+                                           timeout: TimeInterval = 120) {
+        let start = Date()
+        while (preparedAnalysis(state) == nil || preparedAnalysis(state) === previous)
+                && Date().timeIntervalSince(start) < timeout {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        while state.isAnalyzingNightscape && Date().timeIntervalSince(start) < timeout {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+
+    func testNightscapeModeAnalyzesBeforeStackingAndReusesTheAnalysis() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = try writeNightscapeFramesForAnalysis(to: directory)
+
+        let state = StackingStateController.shared
+        state.enableSkyGroundMask = false
+        state.images = [.light: files, .dark: [], .flat: [], .bias: []]
+        state.baseImage = files[0]
+        state.previewImage = files[3]
+        state.stackMode = "Average"
+        state.enableTrailRemoval = false
+        state.maskBitmap = nil
+        state.showResult = true
+        defer {
+            state.enableSkyGroundMask = false
+            state.maskBitmap = nil
+        }
+
+        // ONにすると自動で解析し、判定結果を基準画像の上にブラシで直せるマスクとして表示する
+        let before = preparedAnalysis(state)
+        state.enableSkyGroundMask = true
+        waitForNightscapeAnalysis(state, replacing: before)
+        XCTAssertFalse(state.isAnalyzingNightscape)
+        let prepared = try XCTUnwrap(state.nightscapePrepared, state.nightscapeAnalysisStatus)
+        XCTAssertEqual(state.previewImage?.id, files[0].id, "判定結果は基準画像の上に表示する")
+        XCTAssertFalse(state.showResult)
+        let overlay = try XCTUnwrap(state.maskBitmap)
+        let hints = try XCTUnwrap(NightscapeCompositor.hints(from: overlay, width: 480, height: 320))
+        XCTAssertEqual(hints[20 * 480 + 240], 3, "上は空（自動判定）")
+        XCTAssertEqual(hints[300 * 480 + 240], 4, "下は地上（自動判定）")
+        guard case .developed(_, let analysis) = prepared else { return XCTFail("現像済み画像の解析になっていません") }
+
+        // ブラシで塗った所は、判定し直しても残る
+        let stroke = try XCTUnwrap(NSImage(size: NSSize(width: 480, height: 320), flipped: true) { _ in
+            overlay.draw(in: NSRect(x: 0, y: 0, width: 480, height: 320))
+            NSColor(red: 0, green: 1, blue: 0, alpha: 1).setFill()
+            NSRect(x: 100, y: 40, width: 30, height: 20).fill()
+            return true
+        }.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        state.maskBitmap = NSImage(cgImage: stroke, size: NSSize(width: 480, height: 320))
+        state.analyzeNightscape()
+        waitForNightscapeAnalysis(state, replacing: analysis)
+        let repainted = try XCTUnwrap(NightscapeCompositor.hints(from: try XCTUnwrap(state.maskBitmap), width: 480, height: 320))
+        XCTAssertEqual(repainted[50 * 480 + 110], 2, "ブラシで塗った地上が残る")
+        guard case .developed(_, let reanalyzed)? = state.nightscapePrepared else { return XCTFail("解析がありません") }
+
+        // スタッキングは解析を使い回す（位置合わせをやり直さない）
+        state.startStacking()
+        waitForStacking(state, timeout: 120)
+        XCTAssertNotNil(state.stackedResult, state.stackingStatus)
+        XCTAssertTrue(state.stackingStatus.contains("新星景モードで合成"), state.stackingStatus)
+        guard case .developed(_, let used)? = state.nightscapePrepared else { return XCTFail("解析がありません") }
+        XCTAssertTrue(used === reanalyzed, "スタッキングで解析をやり直さない")
+        XCTAssertFalse(used === analysis)
+
+        // 基準画像を変えたら、前の自動判定の結果（位置がずれている）はすぐに消し、ブラシで塗った所だけ残す
+        let painted = try XCTUnwrap(state.maskBitmap)
+        state.baseImage = files[2]
+        XCTAssertNil(state.nightscapePrepared, "前の解析は手放す")
+        let remaining = try XCTUnwrap(NightscapeCompositor.hints(from: try XCTUnwrap(state.maskBitmap), width: 480, height: 320))
+        XCTAssertFalse(remaining.contains(3) || remaining.contains(4), "前の自動判定の結果が残っていない")
+        XCTAssertEqual(remaining[50 * 480 + 110], 2, "ブラシで塗った所は残る")
+        XCTAssertNotNil(painted)
+        state.enableSkyGroundMask = false
+    }
+
+    private func writeNightscapeFramesForAnalysis(to directory: URL) throws -> [ImageFile] {
+        try writeNightscapeFrames(to: directory, count: 6)
     }
 }
 
