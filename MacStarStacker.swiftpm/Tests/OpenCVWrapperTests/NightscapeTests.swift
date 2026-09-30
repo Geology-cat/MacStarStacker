@@ -377,6 +377,29 @@ final class NightscapeTests: XCTestCase {
         XCTAssertGreaterThan(ground, 120, "細く塗った地上が地上として残る（\(ground)/130）")
     }
 
+    func testRepaintNextToPreviousResultIsRespected() throws {
+        // 前回の自動判定の結果（3=空、4=地上）が表示されている上から、稜線のすぐ上の空を地上として細く塗り直した。
+        // 塗り直しは前回の結果とつながっていても、前回の結果や自動の手がかり（動く星）より優先される
+        var hints = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width { hints[y * width + x] = isGround(x, y) ? 4 : 3 }
+        }
+        for x in 150..<300 {
+            let top = Int(ridge(x)) - 12
+            for y in top..<Int(ridge(x)) where !isGround(x, y) { hints[y * width + x] = 2 }
+        }
+        let mask = try analyzedFixedScene().segment(withHints: Data(hints))
+        let alpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        var repainted = 0, ground = 0
+        for x in 160..<290 {
+            let y = Int(ridge(x)) - 6
+            guard !isGround(x, y) else { continue }
+            repainted += 1
+            if alpha[y * width + x] < 0.5 { ground += 1 }
+        }
+        XCTAssertGreaterThan(Double(ground) / Double(repainted), 0.9, "塗り直した所が地上になる（\(ground)/\(repainted)）")
+    }
+
     func testAutomaticSegmentationMatchesTheScene() throws {
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let starStep = (2.0, 3.0)

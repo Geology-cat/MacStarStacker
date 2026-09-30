@@ -47,7 +47,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double maximumRelativeShift;
 
 /// 空と地上を判定する
-/// @param hints 利用者が塗った手がかり（uint8、width * height。1=空、2=地上、0=自動）。nil なら自動のみ
+/// @param hints 塗った手がかり（uint8、width * height。1=空・2=地上は利用者のブラシ、3=空・4=地上は前回の自動判定の
+///              結果、0=自動）。利用者のブラシを優先する。nil なら自動のみ
 - (nullable NightscapeMask *)segmentWithHints:(nullable NSData *)hints error:(NSError **)error;
 
 @end

@@ -142,17 +142,23 @@ enum NightscapeCompositor {
         return data
     }
 
-    /// 塗った空・地上のマスク（空=青、地上=緑、基準画像と同じ大きさのRGBA 8bit、アルファ乗算済み）を
-    /// 手がかり（1=空、2=地上、0=自動）にする。半透明に塗った所も、色の差を不透明度に比べて判断する
+    /// 自動判定の結果をマスクに塗るときの不透明度。ブラシ（255）と見た目は同じで、ブラシで塗り直した所と区別できる
+    static let detectedOverlayAlpha: UInt8 = 250
+
+    /// 塗った空・地上のマスク（空=青、地上=緑、基準画像と同じ大きさのRGBA 8bit、アルファ乗算済み）を手がかりにする。
+    /// ブラシで塗った所（不透明）は 1=空・2=地上、前回の自動判定の結果（detectedOverlayAlpha）は 3=空・4=地上、
+    /// 塗っていない所は 0。半透明に塗った所も、色の差を不透明度に比べて判断する
     static func hints(fromRGBA pixels: [UInt8], count: Int) -> Data? {
         var hints = [UInt8](repeating: 0, count: count)
         var painted = false
+        let userAlpha = Int(detectedOverlayAlpha) + 3
         for i in 0..<count {
             let green = Int(pixels[i * 4 + 1]), blue = Int(pixels[i * 4 + 2]), alpha = Int(pixels[i * 4 + 3])
             guard alpha >= 32 else { continue }
             let margin = alpha / 4
-            if blue > green + margin { hints[i] = 1; painted = true }
-            else if green > blue + margin { hints[i] = 2; painted = true }
+            let byUser = alpha >= userAlpha
+            if blue > green + margin { hints[i] = byUser ? 1 : 3; painted = true }
+            else if green > blue + margin { hints[i] = byUser ? 2 : 4; painted = true }
         }
         return painted ? Data(hints) : nil
     }
@@ -206,8 +212,8 @@ enum NightscapeCompositor {
                 if y < h - 1 { distance[i] = min(distance[i], distance[i + w] + 1) }
             }
         }
-        // ブラシと同じ色（空: 0,0.2,1 / 地上: 0,1,0）を不透明で塗る
-        let alpha: Float = 1
+        // ブラシと同じ色（空: 0,0.2,1 / 地上: 0,1,0）を、見た目は同じでブラシと区別できる不透明度で塗る
+        let alpha = Float(detectedOverlayAlpha) / 255
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for i in 0..<(w * h) where distance[i] > band {
             let color: (Float, Float, Float) = sky[i] ? (0, 0.2, 1) : (0, 1, 0)
