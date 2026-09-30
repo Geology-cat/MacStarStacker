@@ -90,6 +90,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 合成結果（16bit RGB、width * height * 3）
 - (nullable NSData *)composeWithError:(NSError **)error;
 
+/// 地上を地上固定フレーム groundRGB（16bit RGB、同じ大きさ）にして合成する。各フレームの変換は、地上固定フレームの
+/// 座標へ写すものを渡しておく（判定結果も地上固定フレームの座標）。nil なら composeWithError と同じ
+- (nullable NSData *)composeOntoGround:(nullable NSData *)groundRGB error:(NSError **)error;
+
 @property (nonatomic, readonly) NSInteger frameCount;
 
 /// 外れ値とみなす幅（中央値から、ばらつきの何倍離れたら除くか）。下側（暗い側）・上側（明るい側）。既定は3

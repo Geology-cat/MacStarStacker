@@ -91,11 +91,14 @@ enum RawStackPipeline {
         var nightscapeFeatherRadius: CGFloat = 0
         /// 平均でシグマクリッピング（外れ値を除いてから平均）する。新星景モードでは外れ値を除く幅に使う
         var sigmaClipping: SigmaClipping? = nil
+        /// 新星景モードの地上固定フレーム（同じ三脚で撮った地上。地上はこのフレームにし、このフレームの座標で合成する）
+        var groundFixed: [URL] = []
 
         /// 平均の合成で使うシグマクリッピング（平均以外では nil）
         var averageClipping: SigmaClipping? { mode == .average ? sigmaClipping : nil }
 
         var usesNightscape: Bool { nightscape && mode != .compareBright }
+        var usesGroundFixed: Bool { usesNightscape && !groundFixed.isEmpty }
     }
 
     struct PipelineError: LocalizedError {
@@ -148,6 +151,9 @@ enum RawStackPipeline {
             do {
                 result = try stackNightscape(input: input, baseIndex: baseIndex, info: info, calibrator: calibrator,
                                              prepared: prepared, progress: progress)
+            } catch let error as NightscapeCompositor.CompositorError where input.usesGroundFixed {
+                // 地上固定フレームを登録したときは、黙って地上固定フレームを使わない合成にしない
+                throw PipelineError(message: error.message, allowsFallback: false)
             } catch let error as NightscapeCompositor.CompositorError {
                 // 星・地上の位置合わせができないときは、空と地上を分けずに（位置合わせの設定どおりに）合成する
                 var plain = input
@@ -372,7 +378,8 @@ enum RawStackPipeline {
 
     /// 解析を使い回せるかの判定に使う、入力の組み合わせ
     static func nightscapeKey(for input: Input) -> String {
-        let lists = [input.lights, input.darks, input.flats, input.biases].map { $0.map(\.path).joined(separator: "\n") }
+        let lists = [input.lights, input.darks, input.flats, input.biases, input.usesGroundFixed ? input.groundFixed : []]
+            .map { $0.map(\.path).joined(separator: "\n") }
         return (lists + ["base=\(input.baseIndex)"]).joined(separator: "\n--\n")
     }
 
@@ -397,7 +404,7 @@ enum RawStackPipeline {
                                          cacheFrames: false, isCancelled: isCancelled,
                                          progress: { fraction, status in progress(0.04 + fraction * 0.96, status) })
         } catch let error as NightscapeCompositor.CompositorError {
-            throw PipelineError(message: error.message)
+            throw PipelineError(message: error.message, allowsFallback: !nightscapeInput.usesGroundFixed)
         }
     }
 
@@ -430,12 +437,16 @@ enum RawStackPipeline {
         // 解析のときの判定には、利用者のブラシだけを手がかりにする（前回の自動判定の結果は使わない）
         let hints = try input.skyGroundMask.flatMap { try nightscapeHints(mask: $0, info: info, width: width, height: height) }
             .flatMap(NightscapeCompositor.userHints)
+        let groundFixed = try input.usesGroundFixed
+            ? buildGroundReference(input: input, info: info, base: base, calibrator: calibrator.withoutDark, progress: progress)
+            : nil
+        let groundReference = groundFixed?.pixels
         // 合成で現像し直さないよう、メモリに余裕があれば現像したフレームを保持する
         let frameBytes = UInt64(width * height * 3 * MemoryLayout<UInt16>.size)
         let cacheFrames = allowCache && UInt64(input.lights.count) * frameBytes <= ProcessInfo.processInfo.physicalMemory / 4
         let analysis = try NightscapeCompositor.analyze(
             frameCount: input.lights.count, baseIndex: baseIndex, width: width, height: height, hints: hints,
-            cacheFrames: cacheFrames, isCancelled: isCancelled,
+            groundReference: groundReference, cacheFrames: cacheFrames, isCancelled: isCancelled,
             loadFrame: { index in
                 if index == baseIndex { return base.pixels }
                 let frame = try demosaic(index)
@@ -448,7 +459,40 @@ enum RawStackPipeline {
         )
         var baseInfo = base
         baseInfo.pixels = []  // 画素は解析の結果が保持している
+        if groundFixed?.matchedExposure == false { analysis.groundReferenceNote = NightscapeCompositor.unmatchedExposureNote }
         return NightscapePreparation(key: nightscapeKey(for: input), analysis: analysis, base: baseInfo)
+    }
+
+    /// 地上固定フレームを現像し、露出を Light（基準画像）に揃えて1枚にする。ダークは露出時間が違うため使わない
+    private static func buildGroundReference(input: Input, info: RawSensorInfo, base: CameraRGBFrame,
+                                             calibrator: BayerCalibrator, progress: Progress)
+        throws -> (pixels: [UInt16], matchedExposure: Bool) {
+        let lightMetadata = RawMetadataExtractor.extract(from: input.lights[min(max(0, input.baseIndex), input.lights.count - 1)])
+        var frames: [[UInt16]] = []
+        var scales: [Double] = []
+        var matchedExposure = true
+        for (index, url) in input.groundFixed.enumerated() {
+            progress(0.02, "地上固定フレームを現像中 (\(index + 1)/\(input.groundFixed.count))...")
+            guard RawDecoder.isRawFile(url), let groundInfo = try? RawDecoder.readInfo(from: url),
+                  groundInfo.isStackCompatible(with: info) else {
+                throw PipelineError(message: "地上固定フレームが Light と同じカメラ・同じ向きの RAW ではありません: \(url.lastPathComponent)",
+                                    allowsFallback: false)
+            }
+            var bayer = try RawDecoder.readBayer(from: url)
+            calibrator.apply(to: &bayer.pixels)
+            let frame = try RawDecoder.demosaicCameraRGB(from: url, replacementBayer: bayer.pixels)
+            guard frame.width == base.width, frame.height == base.height else {
+                throw PipelineError(message: "地上固定フレームの大きさが Light と一致しません: \(url.lastPathComponent)",
+                                    allowsFallback: false)
+            }
+            frames.append(frame.pixels)
+            // 撮影情報が無ければ明るさは揃えない
+            let scale = NightscapeCompositor.exposureScale(light: lightMetadata, ground: RawMetadataExtractor.extract(from: url))
+            if scale == nil { matchedExposure = false }
+            scales.append(scale ?? 1)
+        }
+        return (NightscapeCompositor.groundReference(frames: frames, scales: scales, blackLevel: base.blackLevel,
+                                                     whiteLevel: base.whiteLevel), matchedExposure)
     }
 
     private static func stackNightscape(
@@ -496,6 +540,11 @@ enum RawStackPipeline {
         var note = input.mode == .median ? "新星景モードでは、中央値の代わりに外れ値を除いた平均で合成しました" : nil
         switch outcome {
         case .composited(let composited):
+            if input.usesGroundFixed {
+                note = [note, "地上は地上固定フレーム（\(input.groundFixed.count)枚）にし、その構図で合成しました",
+                        preparation.analysis.groundReferenceNote]
+                    .compactMap { $0 }.joined(separator: "。")
+            }
             if composited.groundFallbackCount > 0 {
                 note = [note, "地上の位置合わせができなかった\(composited.groundFallbackCount)枚は、隣のフレームと同じ動きとして合成しました"]
                     .compactMap { $0 }.joined(separator: "。")
@@ -517,7 +566,7 @@ enum RawStackPipeline {
             plain.skyGroundMask = nil
             var result = try stackCameraRGB(input: plain, baseIndex: baseIndex, info: info, calibrator: calibrator,
                                             progress: { fraction, status in progress(0.5 + fraction * 0.5, status) })
-            result.note = reason
+            result.note = input.usesGroundFixed ? "\(reason)。地上固定フレームは使いませんでした" : reason
             result.nightscape = preparation
             return result
         }
@@ -804,7 +853,7 @@ enum RawStackPipeline {
 /// 16bitのセンサー値のキャリブレーション（ダーク・バイアス減算、色ごとに正規化したフラット除算）。
 /// 黒レベル（ペデスタル）は常に保持する: ダーク減算後に黒レベルを足し戻すので、黒付近のノイズが切り捨てられない。
 struct BayerCalibrator {
-    private let dark: [UInt16]?
+    private var dark: [UInt16]?
     private let bias: [UInt16]?
     private let flatGain: [Float]?
     private let blacks: [Float]
@@ -853,6 +902,13 @@ struct BayerCalibrator {
     }
 
     var isIdentity: Bool { dark == nil && bias == nil && flatGain == nil }
+
+    /// ダークを使わないキャリブレーション（露出時間の違う地上固定フレーム用。バイアス・フラットは使う）
+    var withoutDark: BayerCalibrator {
+        var copy = self
+        copy.dark = nil
+        return copy
+    }
 
     func apply(to pixels: inout [UInt16]) {
         guard !isIdentity else { return }

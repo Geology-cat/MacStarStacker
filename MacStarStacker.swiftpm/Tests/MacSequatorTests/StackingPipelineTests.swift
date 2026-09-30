@@ -85,8 +85,9 @@ final class StackingPipelineTests: XCTestCase {
         state.maskBitmap = nil
     }
 
-    /// 稜線（y≈200）の下が岩肌の地上、上が星空の画像。星だけが毎フレーム (2, -3) px 動く（固定撮影）
-    fileprivate func writeNightscapeFrames(to directory: URL, count: Int) throws -> [ImageFile] {
+    /// 稜線（y≈200）の下が岩肌の地上、上が星空の画像。星だけが毎フレーム (2, -3) px 動く（固定撮影）。
+    /// groundFixed なら、同じ構図で星の写っていない地上固定フレーム（地上に目印の明るい四角がある）を1枚書く
+    fileprivate func writeNightscapeFrames(to directory: URL, count: Int, groundFixed: Bool = false) throws -> [ImageFile] {
         let width = 480, height = 320
         var random: UInt64 = 17
         func next() -> Double {
@@ -103,7 +104,7 @@ final class StackingPipelineTests: XCTestCase {
         return try (0..<count).map { frame -> ImageFile in
             var image = [Float](repeating: 2000, count: width * height)
             for i in image.indices { image[i] += Float((next() - 0.5) * 200) }
-            for star in stars {
+            for star in stars where !groundFixed {
                 let cx = star.0 + 2 * Double(frame), cy = star.1 - 3 * Double(frame)
                 let top = max(0, Int(cy) - 4), bottom = min(height - 1, Int(cy) + 4)
                 let left = max(0, Int(cx) - 4), right = min(width - 1, Int(cx) + 4)
@@ -120,7 +121,8 @@ final class StackingPipelineTests: XCTestCase {
                 for x in 0..<width {
                     let i = y * width + x
                     let ground = Double(y) >= ridge(x)
-                    let value = ground ? texture[i] + Float((next() - 0.5) * 200) : image[i]
+                    var value = ground ? texture[i] + Float((next() - 0.5) * 200) : image[i]
+                    if groundFixed && (230..<250).contains(x) && (280..<300).contains(y) { value += 20000 }
                     let (r, b): (Float, Float) = ground ? (1.15, 0.8) : (0.85, 1.2)
                     rgb[i * 3] = UInt16(max(0, min(65535, value * r)))
                     rgb[i * 3 + 1] = UInt16(max(0, min(65535, value)))
@@ -133,7 +135,7 @@ final class StackingPipelineTests: XCTestCase {
                              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue | CGBitmapInfo.byteOrder16Little.rawValue),
                              provider: CGDataProvider(data: data as CFData)!, decode: nil, shouldInterpolate: false,
                              intent: .defaultIntent)!
-            let url = directory.appendingPathComponent("nightscape_\(frame).tiff")
+            let url = directory.appendingPathComponent(groundFixed ? "ground_fixed_\(frame).tiff" : "nightscape_\(frame).tiff")
             try XCTUnwrap(NSBitmapImageRep(cgImage: cg).representation(using: .tiff, properties: [:])).write(to: url)
             return ImageFile(url: url)
         }
@@ -270,6 +272,68 @@ extension StackingPipelineTests {
         XCTAssertEqual(remaining[50 * 480 + 110], 2, "ブラシで塗った所は残る")
         XCTAssertNotNil(painted)
         state.enableSkyGroundMask = false
+    }
+
+    func testNightscapeModeUsesTheGroundFixedFrameForTheGround() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = try writeNightscapeFrames(to: directory, count: 6)
+        let ground = try writeNightscapeFrames(to: directory, count: 1, groundFixed: true)
+
+        let state = StackingStateController.shared
+        state.enableSkyGroundMask = false
+        state.images = [.light: files, .dark: [], .flat: [], .bias: [], .groundFixed: []]
+        state.baseImage = files[0]
+        state.previewImage = files[0]
+        state.stackMode = "Average"
+        state.enableTrailRemoval = false
+        state.maskBitmap = nil
+        defer {
+            state.enableSkyGroundMask = false
+            state.maskBitmap = nil
+            state.images[.groundFixed] = []
+        }
+        state.enableSkyGroundMask = true
+        XCTAssertFalse(state.isGroundFixedActive)
+        // 地上固定フレームを使う前に塗ったマスク（Light の構図）は、使い始めると消す
+        state.maskBitmap = makeImage(width: 480, height: 320, value: 0).tintedGreenMask()
+        state.add(urls: ground.map(\.url), to: .groundFixed)
+        XCTAssertTrue(state.isGroundFixedActive)
+        XCTAssertNil(state.maskBitmap, "Light の構図で塗ったマスクを消す")
+        XCTAssertEqual(state.nightscapeReferenceImage?.url, ground[0].url)
+
+        // 解析すると、判定結果は地上固定フレームの上に表示する
+        state.analyzeNightscape()
+        waitForNightscapeAnalysis(state, replacing: nil)
+        XCTAssertNotNil(state.nightscapePrepared, state.nightscapeAnalysisStatus)
+        XCTAssertEqual(state.previewImage?.url, ground[0].url, "判定結果は地上固定フレームの上に表示する")
+        let overlay = try XCTUnwrap(state.maskBitmap, state.nightscapeAnalysisStatus)
+        let hints = try XCTUnwrap(NightscapeCompositor.hints(from: overlay, width: 480, height: 320))
+        XCTAssertEqual(hints[20 * 480 + 240], 3, "上は空（自動判定）")
+        XCTAssertEqual(hints[300 * 480 + 100], 4, "下は地上（自動判定）")
+
+        // 地上は地上固定フレームになる（目印の四角が写る）。空は Light の星
+        state.startStacking()
+        waitForStacking(state, timeout: 120)
+        let result = try XCTUnwrap(state.stackedResult, state.stackingStatus)
+        XCTAssertTrue(state.stackingStatus.contains("地上固定フレーム（1枚）"), state.stackingStatus)
+        let rgb = try XCTUnwrap(NightscapeCompositor.rgb16(from: result))
+        func green(_ x: Int, _ y: Int) -> Int { Int(rgb.pixels[(y * rgb.width + x) * 3 + 1]) }
+        XCTAssertGreaterThan(green(240, 290), green(100, 290) + 10000, "地上固定フレームの目印が写っていない")
+        XCTAssertEqual(state.previewImage, nil)
+        XCTAssertEqual(state.nightscapeReferenceImage?.url, ground[0].url, "元画像の表示は地上固定フレーム")
+
+        // 外すと地上は Light から合成する（目印は写らない）。地上固定フレームの構図のマスクは消す
+        state.clear(type: .groundFixed)
+        XCTAssertFalse(state.isGroundFixedActive)
+        XCTAssertNil(state.maskBitmap)
+        state.startStacking()
+        waitForStacking(state, timeout: 120)
+        let plain = try XCTUnwrap(NightscapeCompositor.rgb16(from: try XCTUnwrap(state.stackedResult, state.stackingStatus)))
+        XCTAssertLessThan(abs(Int(plain.pixels[(290 * plain.width + 240) * 3 + 1]) - Int(plain.pixels[(290 * plain.width + 100) * 3 + 1])),
+                          10000)
+        XCTAssertFalse(state.stackingStatus.contains("地上固定フレーム"), state.stackingStatus)
     }
 
     private func writeNightscapeFramesForAnalysis(to directory: URL) throws -> [ImageFile] {

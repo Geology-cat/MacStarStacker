@@ -10,6 +10,9 @@ import OpenCVWrapper
 ///
 /// 解析の結果は、ブラシで直してから合成し直すときに使い回せる（位置合わせと判定用のデータ集めをやり直さない）。
 /// フレームは RAW でも現像済みの画像でもよく、`loadFrame` が基準画像と同じ向き・大きさの16bit RGBを返す。
+///
+/// 地上固定フレーム（`groundReference`）を渡すと、地上はそのフレームにし、解析と合成を地上固定フレームの座標で行う
+/// （各フレームを地上固定フレームの地上に合わせ、空は基準画像の星に合わせてから地上固定フレームの座標へ移す）。
 enum NightscapeCompositor {
     struct Result {
         /// 合成結果（16bit RGB、width * height * 3）
@@ -47,6 +50,10 @@ enum NightscapeCompositor {
         let notNeededReason: String?
         /// 解析したときの自動判定（空の割合、判定結果の表示用）。分けて合成しない場合は nil
         let detectedSkyAlpha: [Float]?
+        /// 地上固定フレーム（露出を Light に揃えた16bit RGB）。nil なら地上も Light から合成する
+        let groundReference: [UInt16]?
+        /// 地上固定フレームについての補足（明るさを Light に揃えられなかったなど）
+        var groundReferenceNote: String?
         fileprivate let analyzer: NightscapeAnalyzer?
         fileprivate let samples: NightscapeSamples?
         /// メモリに余裕があるときに保持する現像済みのフレーム（合成で読み直さない）。基準フレームは常に保持する
@@ -60,8 +67,8 @@ enum NightscapeCompositor {
 
         fileprivate init(frameCount: Int, baseIndex: Int, width: Int, height: Int, starHomographies: [[NSNumber]],
                          groundHomographies: [[NSNumber]], groundFallbackCount: Int, notNeededReason: String?,
-                         detectedSkyAlpha: [Float]?, analyzer: NightscapeAnalyzer?, samples: NightscapeSamples?,
-                         frames: [Int: [UInt16]]) {
+                         detectedSkyAlpha: [Float]?, groundReference: [UInt16]?, analyzer: NightscapeAnalyzer?,
+                         samples: NightscapeSamples?, frames: [Int: [UInt16]]) {
             self.frameCount = frameCount
             self.baseIndex = baseIndex
             self.width = width
@@ -71,6 +78,7 @@ enum NightscapeCompositor {
             self.groundFallbackCount = groundFallbackCount
             self.notNeededReason = notNeededReason
             self.detectedSkyAlpha = detectedSkyAlpha
+            self.groundReference = groundReference
             self.analyzer = analyzer
             self.samples = samples
             self.frames = frames
@@ -104,13 +112,15 @@ enum NightscapeCompositor {
                            progress: { fraction, status in progress(0.5 + fraction * 0.5, status) })
     }
 
-    /// 解析: 全フレームを星と地上にそれぞれ位置合わせし、空と地上を自動で判定する（hints は利用者のブラシの手がかり）
+    /// 解析: 全フレームを星と地上にそれぞれ位置合わせし、空と地上を自動で判定する（hints は利用者のブラシの手がかり）。
+    /// groundReference（地上固定フレーム）を渡すと、地上はそのフレームに合わせ、判定も地上固定フレームの座標で行う
     static func analyze(
         frameCount: Int,
         baseIndex: Int,
         width: Int,
         height: Int,
         hints: Data?,
+        groundReference: [UInt16]? = nil,
         cacheFrames: Bool = false,
         isCancelled: () -> Bool = { false },
         loadFrame: (Int) throws -> [UInt16],
@@ -123,7 +133,7 @@ enum NightscapeCompositor {
             return Analysis(frameCount: frameCount, baseIndex: baseIndex, width: width, height: height,
                             starHomographies: [identity], groundHomographies: [identity], groundFallbackCount: 0,
                             notNeededReason: "フレームが1枚のため、空と地上を分けずに合成しました", detectedSkyAlpha: nil,
-                            analyzer: nil, samples: nil, frames: [baseIndex: base])
+                            groundReference: nil, analyzer: nil, samples: nil, frames: [baseIndex: base])
         }
         let baseGray = gray(of: base, count: width * height)
         let starAligner: StarAligner
@@ -132,13 +142,36 @@ enum NightscapeCompositor {
         } catch {
             throw CompositorError(message: "星の位置合わせを準備できませんでした（\(error.localizedDescription)）")
         }
-        // 地上に特徴の無い（真っ暗な）構図では地上の位置合わせができないため、固定撮影として扱う
-        let groundAligner = try? GroundAligner(baseGray: baseGray, width: width, height: height)
+        let groundAligner: GroundAligner?
+        // 基準画像 → 地上固定フレームの座標（地上に合わせる）。地上固定フレームを使わないときは動かさない
+        var toGroundReference = identity
+        if let groundReference {
+            guard groundReference.count == width * height * 3 else {
+                throw CompositorError(message: "地上固定フレームの大きさが Light と一致しません")
+            }
+            do {
+                groundAligner = try GroundAligner(baseGray: gray(of: groundReference, count: width * height),
+                                                  width: width, height: height)
+            } catch {
+                throw CompositorError(message: "地上固定フレームで地上の特徴点が十分に見つかりませんでした（\(error.localizedDescription)）")
+            }
+            do {
+                toGroundReference = try groundAligner!.homography(fromGray: baseGray, initialGuess: nil)
+            } catch {
+                throw CompositorError(message: "地上固定フレームと基準画像の地上を合わせられませんでした（\(error.localizedDescription)）")
+            }
+        } else {
+            // 地上に特徴の無い（真っ暗な）構図では地上の位置合わせができないため、固定撮影として扱う
+            groundAligner = try? GroundAligner(baseGray: baseGray, width: width, height: height)
+        }
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let samples = NightscapeSamples(width: width, height: height)
 
-        var starH = [[NSNumber]](repeating: identity, count: frameCount)
-        var groundH = [[NSNumber]](repeating: identity, count: frameCount)
+        // 星に合わせる変換は、基準画像の星に合わせるもの（次のフレームの初期値）と、それを地上固定フレームの座標へ
+        // 移したもの（解析・合成に使う）を持つ
+        var starToBase = [[NSNumber]](repeating: identity, count: frameCount)
+        var starH = [[NSNumber]](repeating: toGroundReference, count: frameCount)
+        var groundH = [[NSNumber]](repeating: toGroundReference, count: frameCount)
         var groundFallbackCount = groundAligner == nil ? frameCount - 1 : 0
         var frames: [Int: [UInt16]] = [baseIndex: base]
         let order = [baseIndex] + Array((baseIndex + 1)..<frameCount) + Array((0..<baseIndex).reversed())
@@ -152,7 +185,8 @@ enum NightscapeCompositor {
             if index != baseIndex {
                 let neighbor = index > baseIndex ? index - 1 : index + 1
                 do {
-                    starH[index] = try starAligner.homography(fromGray: frameGray, initialGuess: starH[neighbor])
+                    starToBase[index] = try starAligner.homography(fromGray: frameGray, initialGuess: starToBase[neighbor])
+                    starH[index] = groundReference == nil ? starToBase[index] : multiply(toGroundReference, starToBase[index])
                 } catch {
                     throw CompositorError(message: "星の位置合わせに失敗しました（フレーム\(index + 1)：\(error.localizedDescription)）")
                 }
@@ -185,8 +219,8 @@ enum NightscapeCompositor {
         }
         return Analysis(frameCount: frameCount, baseIndex: baseIndex, width: width, height: height,
                         starHomographies: starH, groundHomographies: groundH, groundFallbackCount: groundFallbackCount,
-                        notNeededReason: reason, detectedSkyAlpha: detectedSkyAlpha, analyzer: analyzer, samples: samples,
-                        frames: frames)
+                        notNeededReason: reason, detectedSkyAlpha: detectedSkyAlpha, groundReference: groundReference,
+                        analyzer: analyzer, samples: samples, frames: frames)
     }
 
     /// 合成: 解析の結果を使い、塗った手がかりで空と地上を判定し直して合成する
@@ -227,10 +261,82 @@ enum NightscapeCompositor {
         progress(0.92, "新星景モード: 仕上げ中...")
         // 解析は合成し直すときのために持ち続けるので、保持していたフレームは手放す
         analysis.releaseFrames()
-        let output = try accumulator.compose()
+        let output = try analysis.groundReference.map { reference in
+            try accumulator.composeOntoGround(reference.withUnsafeBufferPointer { Data(buffer: $0) })
+        } ?? accumulator.compose()
         let pixels: [UInt16] = output.withUnsafeBytes { Array($0.bindMemory(to: UInt16.self)) }
         let skyAlpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         return .composited(Result(pixels: pixels, skyAlpha: skyAlpha, groundFallbackCount: analysis.groundFallbackCount))
+    }
+
+    /// 3x3 の変換の積 a * b（行優先9要素。b の後に a を行う）
+    static func multiply(_ a: [NSNumber], _ b: [NSNumber]) -> [NSNumber] {
+        let x = a.map(\.doubleValue), y = b.map(\.doubleValue)
+        return (0..<9).map { k in
+            let row = k / 3, column = k % 3
+            return NSNumber(value: x[row * 3] * y[column] + x[row * 3 + 1] * y[3 + column] + x[row * 3 + 2] * y[6 + column])
+        }
+    }
+
+    // MARK: - 地上固定フレーム
+
+    /// 露出の明るさ（露出時間 × ISO ÷ F値の2乗）。どれかが分からなければ nil
+    static func exposure(of metadata: RawMetadataInfo) -> Double? {
+        guard let time = metadata.exposureTime, time > 0, let iso = metadata.iso, iso > 0,
+              let fNumber = metadata.fNumber, fNumber > 0 else { return nil }
+        return time * Double(iso) / (fNumber * fNumber)
+    }
+
+    /// 撮影情報が無く、明るさを Light に揃えられなかったときの補足
+    static let unmatchedExposureNote = "撮影情報（露出時間・ISO・F値）が無い地上固定フレームは、明るさを Light に揃えずに使いました"
+
+    /// 地上固定フレームの明るさを Light に揃える倍率。撮影情報が無ければ nil
+    static func exposureScale(light: RawMetadataInfo, ground: RawMetadataInfo) -> Double? {
+        guard let lightExposure = exposure(of: light), let groundExposure = exposure(of: ground) else { return nil }
+        return lightExposure / groundExposure
+    }
+
+    /// 地上固定フレーム（16bit RGB、同じ大きさ）の明るさを Light に揃えてから、画素ごとの中央値で1枚にする（2枚なら平均）。
+    /// 同じ三脚で続けて撮ったものとして、フレームどうしの位置合わせはしない（露出の違うフレームでは、
+    /// 流れる星の長さが違い、位置合わせが星に引きずられるため）。
+    /// - Parameters:
+    ///   - scales: 各フレームの明るさの倍率（黒レベルからの値に掛ける）
+    ///   - whiteLevel: 飽和の値。飽和に近い値（98%以上）は、露出の長いフレームで白飛びした灯りなどとして使わない。
+    ///     すべて飽和していれば whiteLevel にする。結果も whiteLevel を超えない
+    static func groundReference(frames: [[UInt16]], scales: [Double], blackLevel: Double, whiteLevel: Double) -> [UInt16] {
+        guard let first = frames.first else { return [] }
+        let count = first.count, frameCount = frames.count
+        let saturation = Float(blackLevel + 0.98 * (whiteLevel - blackLevel))
+        let black = Float(blackLevel), white = Float(min(65535, whiteLevel))
+        let factors = scales.map { Float($0) }
+        var output = [UInt16](repeating: 0, count: count)
+        let chunk = max(1, count / 256)
+        withExtendedLifetime(frames) {
+            let pointers = frames.map { frame in frame.withUnsafeBufferPointer { $0.baseAddress! } }
+            output.withUnsafeMutableBufferPointer { destination in
+                DispatchQueue.concurrentPerform(iterations: (count + chunk - 1) / chunk) { part in
+                    var values = [Float](repeating: 0, count: frameCount)
+                    for i in (part * chunk)..<min(count, (part + 1) * chunk) {
+                        var kept = 0
+                        for f in 0..<frameCount {
+                            let value = Float(pointers[f][i])
+                            guard value < saturation else { continue }
+                            values[kept] = (value - black) * factors[f] + black
+                            kept += 1
+                        }
+                        let result: Float
+                        if kept == 0 {
+                            result = white
+                        } else {
+                            values[0..<kept].sort()
+                            result = kept % 2 == 1 ? values[kept / 2] : (values[kept / 2 - 1] + values[kept / 2]) / 2
+                        }
+                        destination[i] = UInt16(max(0, min(white, result)).rounded())
+                    }
+                }
+            }
+        }
+        return output
     }
 
     /// 16bit RGB の輝度（R・G・Bの平均、float32）

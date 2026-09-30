@@ -7,6 +7,8 @@ enum ImageType: String, CaseIterable, Identifiable {
     case dark = "Dark"
     case flat = "Flat"
     case bias = "Bias"
+    /// 新星景モードの地上固定フレーム（同じ三脚で撮った地上。Light タブの一番上に表示する）
+    case groundFixed = "地上固定"
     
     var id: Self { self }
 }

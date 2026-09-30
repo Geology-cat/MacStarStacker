@@ -12,8 +12,14 @@ final class NightscapeSampleTests: XCTestCase {
         guard let sample = environment["NIGHTSCAPE_SAMPLE_DIR"], let outputPath = environment["NIGHTSCAPE_OUTPUT_DIR"] else {
             throw XCTSkip("NIGHTSCAPE_SAMPLE_DIR と NIGHTSCAPE_OUTPUT_DIR を指定したときだけ実行する")
         }
+        // NIGHTSCAPE_GROUND_FIXED に地上固定フレームのパス（カンマ区切り）を指定できる（Light からは除く）
+        let groundFixed = (environment["NIGHTSCAPE_GROUND_FIXED"] ?? "").split(separator: ",")
+            .map { URL(fileURLWithPath: String($0)).standardizedFileURL }
         let lights = try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: sample), includingPropertiesForKeys: nil)
             .filter(RawDecoder.isRawFile)
+            // 名前に「地上固定」を含むファイルは、NIGHTSCAPE_GROUND_FIXED に指定しないときも Light に含めない
+            .filter { url in !groundFixed.contains { $0.lastPathComponent == url.lastPathComponent } }
+            .filter { !$0.lastPathComponent.contains("地上固定") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         XCTAssertFalse(lights.isEmpty)
         let output = URL(fileURLWithPath: outputPath)
@@ -22,10 +28,11 @@ final class NightscapeSampleTests: XCTestCase {
 
         // NIGHTSCAPE_HINTS に、ブラシと同じ色（空=青、地上=緑）で塗ったマスク画像を指定できる
         let hints = environment["NIGHTSCAPE_HINTS"].flatMap { NSImage(contentsOfFile: $0) }
-        let input = RawStackPipeline.Input(
+        var input = RawStackPipeline.Input(
             lights: lights, baseIndex: baseIndex, darks: [], flats: [], biases: [], mode: .average, align: true,
             skyGroundMask: hints, maskFeatherRadius: 0, trailMasks: [:], nightscape: true
         )
+        input.groundFixed = groundFixed
         // NIGHTSCAPE_PREPARE を指定すると、アプリと同じく先に解析し、その結果を使い回して合成する
         var prepared: RawStackPipeline.NightscapePreparation?
         if environment["NIGHTSCAPE_PREPARE"] != nil {
