@@ -14,6 +14,8 @@ const int kAnalysisMaxSide = 1000;
 const int kGuideMaxSide = 3000;
 /// 判定用の画像から細かな構造（星や模様）を取り出すときに除く、なだらかな明るさのぼかしの大きさ（判定用の解像度のpx）
 const double kDetailSigma = 2.0;
+/// 塗った手がかりの縁の幅（判定用の画像の長辺に対する割合）。縁は「おそらくその側」として本当の境界に吸い付かせる
+const double kHintRimFraction = 0.02;
 /// 空の手がかり（動く星）からこの距離（判定用の画像の長辺に対する割合）より離れた画素は、初めは地上寄りとみなす
 const double kStarSupportDistance = 0.03;
 
@@ -146,6 +148,26 @@ cv::Mat ColorGuidedFilter(const cv::Mat &guide, const cv::Mat &p, int radius, do
         q += meanA.mul(I[c]);
     }
     return q;
+}
+
+/// 塗った手がかり（255）の内側（縁を rim px 除いた所）。縁を除くと消えてしまう細い塗りは、そのまま残す
+cv::Mat HintCore(const cv::Mat &painted, int rim) {
+    cv::Mat core;
+    cv::erode(painted, core, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * rim + 1, 2 * rim + 1)));
+    cv::Mat labels;
+    const int count = cv::connectedComponents(painted, labels, 8, CV_32S);
+    std::vector<bool> hasCore(count, false);
+    for (int y = 0; y < core.rows; y++) {
+        const uchar *c = core.ptr<uchar>(y);
+        const int *l = labels.ptr<int>(y);
+        for (int x = 0; x < core.cols; x++) if (c[x]) hasCore[l[x]] = true;
+    }
+    for (int y = 0; y < core.rows; y++) {
+        uchar *c = core.ptr<uchar>(y);
+        const int *l = labels.ptr<int>(y);
+        for (int x = 0; x < core.cols; x++) if (l[x] > 0 && !hasCore[l[x]]) c[x] = 255;
+    }
+    return core;
 }
 
 /// 地上の手がかり（255）を、各フレームの星と地上のずれ（relative: 星に合わせた座標 → 地上に合わせた座標）と
@@ -421,14 +443,26 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     seedGround = ErodeByRelativeMotion(seedGround, _relative);
     cv::erode(seedGround, seedGround, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7)));
 
-    // 利用者が塗った手がかりは確実なものとして扱う
+    // 利用者が塗った手がかり。ブラシは本当の境界より少しはみ出して塗られることが多く、そのまま確実なものとすると
+    // 境界が塗った跡に沿ってしまい、空に星の無い帯が出る。塗った範囲の内側は確実なものとし、縁（kHintRimFraction）は
+    // 「おそらくその側」として色と輪郭で本当の境界に吸い付かせる。縁に反対側の確実な手がかり（動く星など）があれば
+    // そちらを優先する。縁を除くと消えてしまう細い塗りは、意図して細かく直した所なのでそのまま確実なものとする
+    cv::Mat rimSky, rimGround;
     if (hints.length >= (NSUInteger)_width * _height) {
         cv::Mat hintFull(_height, _width, CV_8U, (void *)hints.bytes), hintSmall;
         cv::resize(hintFull, hintSmall, _analysisSize, 0, 0, cv::INTER_NEAREST);
-        seedSky.setTo(255, hintSmall == 1);
-        seedGround.setTo(0, hintSmall == 1);
-        seedGround.setTo(255, hintSmall == 2);
-        seedSky.setTo(0, hintSmall == 2);
+        const int rim = std::max(1, (int)std::lround(kHintRimFraction * std::max(_analysisSize.width, _analysisSize.height)));
+        const cv::Mat paintedSky = hintSmall == 1, paintedGround = hintSmall == 2;
+        const cv::Mat coreSky = HintCore(paintedSky, rim), coreGround = HintCore(paintedGround, rim);
+        rimSky = paintedSky & ~coreSky & ~seedGround;
+        rimGround = paintedGround & ~coreGround & ~seedSky;
+        seedSky.setTo(255, coreSky);
+        seedGround.setTo(0, coreSky);
+        seedGround.setTo(255, coreGround);
+        seedSky.setTo(0, coreGround);
+        // 縁では、塗った側と同じ向きの自動の手がかりも確実なものから外す（本当の境界まで動けるように）
+        seedSky.setTo(0, rimGround);
+        seedGround.setTo(0, rimSky);
     }
 
     const double minimumSeed = 0.002 * (double)_analysisSize.area();
@@ -449,6 +483,10 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
         cv::distanceTransform(seedSky == 0, distanceToStars, cv::DIST_L2, cv::DIST_MASK_PRECISE);
         cv::Mat grabMask(_analysisSize, CV_8U, cv::Scalar(cv::GC_PR_BGD));
         grabMask.setTo(cv::GC_PR_FGD, (tendency > 0) & (distanceToStars <= kStarSupportDistance * longSide));
+        if (!rimSky.empty()) {
+            grabMask.setTo(cv::GC_PR_FGD, rimSky);
+            grabMask.setTo(cv::GC_PR_BGD, rimGround);
+        }
         grabMask.setTo(cv::GC_FGD, seedSky);
         grabMask.setTo(cv::GC_BGD, seedGround);
         cv::Mat backgroundModel, foregroundModel;
@@ -481,9 +519,11 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     cv::Mat alphaGuide = ColorGuidedFilter(guide, skyGuideRes, radius, 1e-3);
     cv::max(alphaGuide, 0.0, alphaGuide);
     cv::min(alphaGuide, 1.0, alphaGuide);
+    // ガイドフィルタは窓の平均を2回取るため、境界から 2 * radius 先まで値が変わる。帯をそれより狭くすると
+    // 帯の端で比率が段になり、空に境界と平行な線が出る
     cv::Mat boundary;
     cv::morphologyEx(skyGuideRes > 0.5f, boundary, cv::MORPH_GRADIENT,
-                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * radius + 1, 2 * radius + 1)));
+                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(4 * radius + 1, 4 * radius + 1)));
     skyGuideRes.copyTo(alphaGuide, boundary == 0);
     cv::Mat alpha;
     cv::resize(alphaGuide, alpha, cv::Size(_width, _height), 0, 0, cv::INTER_LINEAR);

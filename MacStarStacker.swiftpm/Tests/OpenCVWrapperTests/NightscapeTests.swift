@@ -325,6 +325,58 @@ final class NightscapeTests: XCTestCase {
         XCTAssertEqual(wide[row + 270], 0.84, accuracy: 0.06)
     }
 
+    /// 星が (2, 3) px ずつ動く固定撮影を解析したもの
+    private func analyzedFixedScene() throws -> NightscapeAnalyzer {
+        let analyzer = NightscapeAnalyzer(width: width, height: height)
+        for i in 0..<frameCount {
+            let frame = render(starShift: (2 * Double(i), 3 * Double(i)), groundShift: (0, 0), seed: UInt64(100 + i))
+            try analyzer.addFrameGray(frame.gray, rgb: frame.rgb,
+                                      starHomography: translation(-2 * Double(i), -3 * Double(i)),
+                                      groundHomography: translation(0, 0))
+        }
+        return analyzer
+    }
+
+    func testSloppyGroundPaintSnapsToTheRidge() throws {
+        // 地上を稜線から空へ 8px はみ出して塗っても、はみ出した所は空に戻る（空に星の無い帯を作らない）
+        var hints = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width where Double(y) >= ridge(x) - 8 && !isTree(x, y) { hints[y * width + x] = 2 }
+        }
+        let mask = try analyzedFixedScene().segment(withHints: Data(hints))
+        let alpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        var overpainted = 0, backToSky = 0
+        for y in 0..<height {
+            for x in 0..<width where hints[y * width + x] == 2 && !isGround(x, y) && Double(y) < ridge(x) - 3 {
+                overpainted += 1
+                if alpha[y * width + x] >= 0.5 { backToSky += 1 }
+            }
+        }
+        XCTAssertGreaterThan(overpainted, 1000)
+        XCTAssertGreaterThan(Double(backToSky) / Double(overpainted), 0.8, "はみ出して塗った空が空に戻る（\(backToSky)/\(overpainted)）")
+        // 稜線の下の地上は地上のまま
+        var groundKept = 0, groundCount = 0
+        for y in 0..<height {
+            for x in 0..<width where Double(y) > ridge(x) + 5 {
+                groundCount += 1
+                if alpha[y * width + x] < 0.5 { groundKept += 1 }
+            }
+        }
+        XCTAssertGreaterThan(Double(groundKept) / Double(groundCount), 0.98)
+    }
+
+    func testThinDeliberateStrokeIsRespected() throws {
+        // 空の中に細く（12px。縁の幅の2倍より細い）地上を塗った所は、縁を除くと消えてしまうが、
+        // 意図して直した所としてそのまま地上にする
+        var hints = [UInt8](repeating: 0, count: width * height)
+        for y in 76..<88 { for x in 150..<300 { hints[y * width + x] = 2 } }
+        let mask = try analyzedFixedScene().segment(withHints: Data(hints))
+        let alpha: [Float] = mask.skyAlpha.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        var ground = 0
+        for x in 160..<290 where alpha[82 * width + x] < 0.5 { ground += 1 }
+        XCTAssertGreaterThan(ground, 120, "細く塗った地上が地上として残る（\(ground)/130）")
+    }
+
     func testAutomaticSegmentationMatchesTheScene() throws {
         let analyzer = NightscapeAnalyzer(width: width, height: height)
         let starStep = (2.0, 3.0)
