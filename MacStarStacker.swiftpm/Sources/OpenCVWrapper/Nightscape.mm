@@ -208,23 +208,42 @@ cv::Mat FloodFromSeeds(const cv::Mat &image8, const cv::Mat &seedSky, const cv::
     return sky;
 }
 
-/// 塗った手がかり（255）の内側（縁を rim px 除いた所）。keepThin なら、縁を除くと消えてしまう細い塗りはそのまま残す
-cv::Mat HintCore(const cv::Mat &painted, int rim, bool keepThin) {
-    cv::Mat core;
-    cv::erode(painted, core, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * rim + 1, 2 * rim + 1)));
-    if (!keepThin) return core;
+/// 塗った手がかり（255）の内側（縁を rim px 除いた所）。
+/// byUser（利用者のブラシ）なら、縁を除くと消えてしまう細い塗り（太さ＝内接円の半径が rim 以下）は、意図して細かく
+/// 直した所としてそのまま確実なものにする。それより太い塗りは、縁の幅を太さの 1/3 までに抑える。
+/// はみ出しを本当の輪郭に吸い付かせる縁を残しつつ、狭い所を塗り直したときに、塗りのほとんどが「おそらく」に
+/// なって色の判定に負けないようにする
+cv::Mat HintCore(const cv::Mat &painted, int rim, bool byUser) {
+    if (!byUser) {
+        cv::Mat core;
+        cv::erode(painted, core, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * rim + 1, 2 * rim + 1)));
+        return core;
+    }
+    cv::Mat core = cv::Mat::zeros(painted.size(), CV_8U);
+    if (cv::countNonZero(painted) == 0) return core;
+    // 塗りの縁までの距離（画像の端は縁としない）
+    cv::Mat padded, distance;
+    cv::copyMakeBorder(painted, padded, 1, 1, 1, 1, cv::BORDER_REPLICATE);
+    cv::distanceTransform(padded, distance, cv::DIST_L2, 3);
+    distance = distance(cv::Rect(1, 1, painted.cols, painted.rows)).clone();
     cv::Mat labels;
     const int count = cv::connectedComponents(painted, labels, 8, CV_32S);
-    std::vector<bool> hasCore(count, false);
-    for (int y = 0; y < core.rows; y++) {
-        const uchar *c = core.ptr<uchar>(y);
+    std::vector<float> thickness(count, 0);
+    for (int y = 0; y < painted.rows; y++) {
         const int *l = labels.ptr<int>(y);
-        for (int x = 0; x < core.cols; x++) if (c[x]) hasCore[l[x]] = true;
+        const float *d = distance.ptr<float>(y);
+        for (int x = 0; x < painted.cols; x++) if (l[x] > 0) thickness[l[x]] = std::max(thickness[l[x]], d[x]);
     }
-    for (int y = 0; y < core.rows; y++) {
-        uchar *c = core.ptr<uchar>(y);
+    for (int y = 0; y < painted.rows; y++) {
         const int *l = labels.ptr<int>(y);
-        for (int x = 0; x < core.cols; x++) if (l[x] > 0 && !hasCore[l[x]]) c[x] = 255;
+        const float *d = distance.ptr<float>(y);
+        uchar *c = core.ptr<uchar>(y);
+        for (int x = 0; x < painted.cols; x++) {
+            if (l[x] <= 0) continue;
+            const float componentThickness = thickness[l[x]];
+            const float componentRim = componentThickness <= rim ? 0.0f : std::min((float)rim, componentThickness / 3.0f);
+            if (d[x] > componentRim) c[x] = 255;
+        }
     }
     return core;
 }
@@ -803,6 +822,7 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     cv::Mat _skySum, _skyWeight;                   // 確実に空だった画素だけを星に合わせて平均
     cv::Mat _groundSum, _groundWeight;             // 画面全体を地上に合わせて平均（空の部分は星のない空＝光害フレーム）
     bool _rejecting;
+    double _maximumRelativeShift;  // 星と地上の動きの差の最大値（px）
     cv::Mat _skyMedian, _skySpread, _groundMedian, _groundSpread;
     NSInteger _frameCount;
 }
@@ -822,6 +842,7 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     _rejecting = samples != nil && samples.frameCount >= 3;
     _rejectionLowSigma = 3;
     _rejectionHighSigma = 3;
+    _maximumRelativeShift = 0;
     if (_rejecting) [self prepareRejectionFrom:samples];
     return self;
 }
@@ -865,6 +886,32 @@ static cv::Mat Luminance(const cv::Mat &rgb) {
     return gray;
 }
 
+/// 地上の明るい灯り（漁火・街の灯り）の周りの強さ（0〜1）。灯りは地上に合わせた層（光害フレーム）で、
+/// 画面全体の中央値の8倍を超えて明るい所とし、灯りからの距離が星と地上の動きの差（radius）ほどまで効かせる。
+/// 灯りが無ければ空
+static cv::Mat BrightGroundLightWeight(const cv::Mat &lightPollution, const cv::Mat &hasGround, double radius) {
+    if (radius < 1) return cv::Mat();
+    const cv::Mat luminance = Luminance(lightPollution);
+    std::vector<float> values;
+    for (int y = 0; y < luminance.rows; y += 8) {
+        const float *row = luminance.ptr<float>(y);
+        const uchar *valid = hasGround.ptr<uchar>(y);
+        for (int x = 0; x < luminance.cols; x += 8) if (valid[x]) values.push_back(row[x]);
+    }
+    if (values.empty()) return cv::Mat();
+    std::nth_element(values.begin(), values.begin() + values.size() / 2, values.end());
+    const float threshold = 8.0f * std::max(1.0f, values[values.size() / 2]);
+    const cv::Mat bright = (luminance > threshold) & hasGround;
+    if (cv::countNonZero(bright) == 0) return cv::Mat();
+    cv::Mat distance;
+    cv::distanceTransform(~bright, distance, cv::DIST_L2, 5);
+    const double sigma = 0.6 * radius;
+    cv::Mat weight;
+    cv::exp(distance.mul(distance) * (-0.5 / (sigma * sigma)), weight);
+    weight.setTo(0, ~hasGround);
+    return weight;
+}
+
 static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, const cv::Mat &weight) {
     cv::Mat weight3;
     cv::merge(std::vector<cv::Mat>{weight, weight, weight}, weight3);
@@ -884,6 +931,15 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     cv::Mat frame;
     cv::Mat(size, CV_16UC3, (void *)rgb.bytes).convertTo(frame, CV_32FC3);
     const cv::Matx33d hs = MatrixFromArray(starHomography), hg = MatrixFromArray(groundHomography);
+    // 地上に固定されたものが、星に合わせた層でどれだけ動くか（四隅と中央で最大のもの）
+    const cv::Matx33d relative = hs * hg.inv();
+    const double points[5][2] = {{0, 0}, {(double)_width, 0}, {0, (double)_height}, {(double)_width, (double)_height},
+                                 {_width * 0.5, _height * 0.5}};
+    for (const auto &point : points) {
+        const cv::Vec3d moved = relative * cv::Vec3d(point[0], point[1], 1);
+        _maximumRelativeShift = std::max(_maximumRelativeShift,
+                                         std::hypot(moved[0] / moved[2] - point[0], moved[1] / moved[2] - point[1]));
+    }
 
     // 空: 星に合わせて変形し、このフレームで確実に空だった画素だけを加える
     cv::Mat starWarped;
@@ -952,6 +1008,9 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     }
     // 光害フレームを重ねる強さ: 地上との境界で1、空の奥へ向かってなだらかに0へ
     const cv::Mat lightPollutionWeight = LightPollutionWeight(alpha);
+    // 地上の明るい灯り（漁火など）のにじみ・光条は、星に合わせると星と地上の動きの差だけ流れて伸びる。
+    // 灯りの周り（動きの差ほどの範囲）は、空の背景を光害フレーム（地上に合わせた層）にし、星だけ重ねる
+    const cv::Mat groundFixedLight = BrightGroundLightWeight(lightPollution, hasGround, _maximumRelativeShift);
 
     NSMutableData *output = [NSMutableData dataWithLength:(NSUInteger)size.area() * 3 * sizeof(uint16_t)];
     uint16_t *out = (uint16_t *)output.mutableBytes;
@@ -968,6 +1027,14 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
                     cv::Vec3f lighter = lightRow[x];
                     if (hasSkyRow[x]) lighter += starRow[x];
                     for (int c = 0; c < 3; c++) skyValue[c] += weightRow[x] * std::max(0.0f, lighter[c] - skyValue[c]);
+                }
+                if (!groundFixedLight.empty() && hasGroundRow[x]) {
+                    const float fixedWeight = groundFixedLight.at<float>(y, x);
+                    if (fixedWeight > 0) {
+                        cv::Vec3f target = lightRow[x];
+                        if (hasSkyRow[x]) target += starRow[x];
+                        skyValue += fixedWeight * (target - skyValue);
+                    }
                 }
                 // 地上を一番上に重ねる（地上側は明るくしない・星を足さない）
                 const cv::Vec3f value = skyValue * a[x] + groundRow[x] * (1.0f - a[x]);
