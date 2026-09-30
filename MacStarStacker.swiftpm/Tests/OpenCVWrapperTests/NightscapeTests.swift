@@ -180,6 +180,51 @@ final class NightscapeTests: XCTestCase {
         return pixels(try accumulator.compose())
     }
 
+    /// 地上固定フレームに合成するとき、境界ぼかしは地上側にだけ広がる（空は変わらない）
+    func testGroundSideFeatheringLeavesTheSkyUntouched() throws {
+        let mask = NightscapeMask(skyAlpha: truthAlpha(), width: width, height: height)
+        var frames: [(image: (rgb: Data, gray: Data), star: [NSNumber], ground: [NSNumber])] = []
+        for i in 0..<frameCount {
+            let t = Double(i)
+            frames.append((render(starShift: (2 * t, -3 * t), groundShift: (0, 0), seed: UInt64(100 + i)),
+                           translation(-2 * t, 3 * t), translation(0, 0)))
+        }
+        let samples = NightscapeSamples(width: width, height: height)
+        for frame in frames {
+            try samples.addFrameGray(frame.image.gray, starHomography: frame.star, groundHomography: frame.ground)
+        }
+        // 地上固定フレーム: 一様な明るさ（Light から合成した地上とは違う）
+        let reference = [UInt16](repeating: 9000, count: width * height * 3).withUnsafeBufferPointer { Data(buffer: $0) }
+        func compose(feather: Double) throws -> [Float] {
+            let accumulator = NightscapeAccumulator(mask: mask, samples: samples)
+            accumulator.groundSideFeatherRadius = feather
+            for frame in frames {
+                try accumulator.addFrameRGB(frame.image.rgb, starHomography: frame.star, groundHomography: frame.ground)
+            }
+            return pixels(try accumulator.composeOntoGround(reference))
+        }
+        let sharp = try compose(feather: 0), soft = try compose(feather: 12)
+        var skyChanged = 0, nearGroundChanged = 0, nearGroundCount = 0, deepGroundChanged = 0
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * width + x
+                let changed = abs(sharp[i] - soft[i]) > 1
+                if !isGround(x, y) {
+                    if changed { skyChanged += 1 }
+                } else if Double(y) < ridge(x) + 4, !isTree(x, y) {
+                    nearGroundCount += 1
+                    if changed { nearGroundChanged += 1 }
+                } else if Double(y) > ridge(x) + 80, changed {
+                    deepGroundChanged += 1
+                }
+            }
+        }
+        XCTAssertEqual(skyChanged, 0, "空は変わらない")
+        XCTAssertGreaterThan(Double(nearGroundChanged) / Double(nearGroundCount), 0.9, "稜線のすぐ下はなじませる")
+        XCTAssertEqual(deepGroundChanged, 0, "境界から離れた地上は地上固定フレームのまま")
+        XCTAssertEqual(sharp[(height - 5) * width + 10], 9000, accuracy: 1)
+    }
+
     private func check(starStep: (Double, Double), groundStep: (Int, Int), label: String) throws {
         let mask = NightscapeMask(skyAlpha: truthAlpha(), width: width, height: height)
         let output = try compose(starStep: starStep, groundStep: groundStep, mask: mask)

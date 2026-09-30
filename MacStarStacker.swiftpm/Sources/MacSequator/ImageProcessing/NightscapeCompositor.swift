@@ -241,10 +241,13 @@ enum NightscapeCompositor {
         guard detected.hasBothRegions else {
             return .notNeeded("空と地上をはっきり見分けられなかったため、空と地上を分けずに合成しました")
         }
-        // 境界ぼかし（px）を指定したときは、自動で決めた境界をさらにぼかして重ね合わせる
-        let mask = featherRadius > 0 ? detected.feathered(radius: featherRadius) : detected
+        // 境界ぼかし（px）を指定したときは、自動で決めた境界をさらにぼかして重ね合わせる。
+        // 地上固定フレームを使うときは、地上側にだけ広げる（空の星に地上固定フレームのノイズを混ぜない）
+        let groundSideFeather = analysis.groundReference != nil
+        let mask = featherRadius > 0 && !groundSideFeather ? detected.feathered(radius: featherRadius) : detected
 
         let accumulator = NightscapeAccumulator(mask: mask, samples: samples)
+        if groundSideFeather { accumulator.groundSideFeatherRadius = featherRadius }
         // 外れ値（動く星・飛行機など）を除く幅。シグマクリッピングの κ を使う（既定は3）
         if let clipping {
             accumulator.rejectionLowSigma = Double(clipping.low)

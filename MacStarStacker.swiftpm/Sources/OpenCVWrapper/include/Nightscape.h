@@ -100,6 +100,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) double rejectionLowSigma;
 @property (nonatomic) double rejectionHighSigma;
 
+/// 地上固定フレームに合成するときの境界ぼかし（px、ガウスぼかしの標準偏差）。地上側にだけ広げる。既定は0
+@property (nonatomic) double groundSideFeatherRadius;
+
 @end
 
 NS_ASSUME_NONNULL_END
