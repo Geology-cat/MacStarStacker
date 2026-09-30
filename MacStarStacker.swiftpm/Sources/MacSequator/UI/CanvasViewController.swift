@@ -237,6 +237,7 @@ public class CanvasViewController: NSViewController {
         canvasView.currentImage = displayImg
         canvasView.isMaskEditingEnabled = state.enableSkyGroundMask
             && !state.showResult && !state.isStacking && displayImg != nil
+        canvasView.maskFeatherRadius = state.featherRadiusForCurrentMode
         canvasView.synchronizeMask(from: state.maskBitmap)
 
         // スタック結果トグルボタンの表示

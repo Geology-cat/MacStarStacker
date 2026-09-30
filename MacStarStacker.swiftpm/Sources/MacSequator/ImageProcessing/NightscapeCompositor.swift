@@ -40,6 +40,7 @@ enum NightscapeCompositor {
         width: Int,
         height: Int,
         hints: Data?,
+        featherRadius: Double = 0,
         cacheFrames: Bool = false,
         loadFrame: (Int) throws -> [UInt16],
         progress: (Double, String) -> Void
@@ -101,10 +102,12 @@ enum NightscapeCompositor {
 
         // 2. 空と地上の判定
         progress(0.47, "新星景モード: 空と地上を判定中...")
-        let mask = try analyzer.segment(withHints: hints)
-        guard mask.hasBothRegions else {
+        let detected = try analyzer.segment(withHints: hints)
+        guard detected.hasBothRegions else {
             return .notNeeded("空と地上をはっきり見分けられなかったため、空と地上を分けずに合成しました")
         }
+        // 境界ぼかし（px）を指定したときは、自動で決めた境界をさらにぼかして重ね合わせる
+        let mask = featherRadius > 0 ? detected.feathered(radius: featherRadius) : detected
 
         // 3. 合成（もう一度各フレームを読む）
         let accumulator = NightscapeAccumulator(mask: mask, samples: samples)
@@ -167,7 +170,8 @@ enum NightscapeCompositor {
         return hints(fromRGBA: pixels, count: width * height)
     }
 
-    /// 自動判定の結果を、ブラシで直せるマスク画像（空=青、地上=緑を半透明で塗る）にする。
+    /// 自動判定の結果を、ブラシで直せるマスク画像（空=青、地上=緑。ブラシと同じ色・不透明度で塗り、
+    /// 表示のときに半透明にする。上から塗り直しても色が変わらない）にする。
     /// 境界の近くは塗らずに残し、もう一度合成するときも境界は自動で決まるようにする。
     /// 塗った所は次の合成で手がかりとして優先される
     static func hintOverlay(skyAlpha: [Float], width: Int, height: Int, maxSide: Int = 1500) -> CGImage? {
@@ -202,8 +206,8 @@ enum NightscapeCompositor {
                 if y < h - 1 { distance[i] = min(distance[i], distance[i + w] + 1) }
             }
         }
-        // ブラシと同じ色（空: 0,0.2,1 / 地上: 0,1,0）を不透明度0.4で塗る（アルファ乗算済み）
-        let alpha: Float = 0.4
+        // ブラシと同じ色（空: 0,0.2,1 / 地上: 0,1,0）を不透明で塗る
+        let alpha: Float = 1
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for i in 0..<(w * h) where distance[i] > band {
             let color: (Float, Float, Float) = sky[i] ? (0, 0.2, 1) : (0, 1, 0)

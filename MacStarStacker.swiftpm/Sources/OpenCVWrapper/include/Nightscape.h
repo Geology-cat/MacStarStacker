@@ -17,6 +17,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 与えた空の割合から判定結果を作る（テスト・手動マスク用）
 - (instancetype)initWithSkyAlpha:(NSData *)skyAlpha width:(NSInteger)width height:(NSInteger)height;
+
+/// 空と地上の境界を、半径（px、ガウスぼかしの標準偏差）の分だけさらにぼかした判定結果。
+/// 空・地上をそれぞれ合成する範囲（certainSky・certainGround）は変えず、重ね合わせの比率（skyAlpha）だけをぼかす
+- (NightscapeMask *)maskByFeatheringWithRadius:(double)radius NS_SWIFT_NAME(feathered(radius:));
 @end
 
 /// 各フレームの「星に合わせた画像」と「地上に合わせた画像」を縮小して集め、空と地上を自動で判定する。

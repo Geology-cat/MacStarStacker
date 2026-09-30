@@ -836,14 +836,14 @@ public class SettingsViewController: NSViewController {
         brushModeSegmented.isEnabled = state.enableSkyGroundMask
         brushSizeSlider.isEnabled = state.enableSkyGroundMask
         brushSizeLabel.isEnabled = state.enableSkyGroundMask
-        // 新星景モードの境界のぼかしは画像の輪郭に沿って自動で決まる
-        maskFeatherSlider.isEnabled = state.enableSkyGroundMask && !nightscape
-        maskFeatherLabel.isEnabled = state.enableSkyGroundMask && !nightscape
+        // 境界ぼかしは新星景モードと比較明で別々に持つ（新星景モードは境界を自動でなじませるため既定 0 px）
+        maskFeatherSlider.isEnabled = state.enableSkyGroundMask
+        maskFeatherLabel.isEnabled = state.enableSkyGroundMask
         maskFeatherSlider.toolTip = nightscape
-            ? "新星景モードでは、境界は画像の輪郭に沿って自動で滑らかになります"
+            ? "自動で判定した境界を、さらにぼかして空と地上をなじませます（0 pxなら画像の輪郭に沿った自動の境界のまま）"
             : "空と地上の境界を合成時に滑らかにします（0 pxで無効）"
-        maskFeatherSlider.doubleValue = Double(state.maskFeatherRadius)
-        maskFeatherLabel.stringValue = "\(Int(round(state.maskFeatherRadius))) px"
+        maskFeatherSlider.doubleValue = Double(state.featherRadiusForCurrentMode)
+        maskFeatherLabel.stringValue = "\(Int(round(state.featherRadiusForCurrentMode))) px"
         clearMaskButton.isEnabled = state.enableSkyGroundMask && state.maskBitmap != nil
 
         // ボタンの有効化
@@ -981,7 +981,7 @@ public class SettingsViewController: NSViewController {
 
     @objc private func onMaskFeatherChanged() {
         let radius = CGFloat(maskFeatherSlider.doubleValue.rounded())
-        StackingStateController.shared.maskFeatherRadius = radius
+        StackingStateController.shared.featherRadiusForCurrentMode = radius
         maskFeatherLabel.stringValue = "\(Int(radius)) px"
     }
 
