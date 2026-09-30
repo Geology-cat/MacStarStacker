@@ -33,6 +33,8 @@ final class NightscapeSampleTests: XCTestCase {
             skyGroundMask: hints, maskFeatherRadius: 0, trailMasks: [:], nightscape: true
         )
         input.groundFixed = groundFixed
+        // NIGHTSCAPE_FEATHER で境界ぼかし（px）を指定できる
+        input.nightscapeFeatherRadius = CGFloat(Double(environment["NIGHTSCAPE_FEATHER"] ?? "") ?? 0)
         // NIGHTSCAPE_PREPARE を指定すると、アプリと同じく先に解析し、その結果を使い回して合成する
         var prepared: RawStackPipeline.NightscapePreparation?
         if environment["NIGHTSCAPE_PREPARE"] != nil {

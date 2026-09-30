@@ -988,6 +988,8 @@ public class SettingsViewController: NSViewController {
         maskFeatherSlider.toolTip = nightscape
             ? "自動で判定した境界を、さらにぼかして空と地上をなじませます（0 pxなら画像の輪郭に沿った自動の境界のまま）"
             : "空と地上の境界を合成時に滑らかにします（0 pxで無効）"
+        // 新星景モードは画像全体（数千px）の継ぎ目をなじませるため広く、比較明の分離合成は 100 px まで
+        maskFeatherSlider.maxValue = state.isNightscapeActive ? 300 : 100
         maskFeatherSlider.doubleValue = Double(state.featherRadiusForCurrentMode)
         maskFeatherLabel.stringValue = "\(Int(round(state.featherRadiusForCurrentMode))) px"
         clearMaskButton.isEnabled = state.enableSkyGroundMask && state.maskBitmap != nil

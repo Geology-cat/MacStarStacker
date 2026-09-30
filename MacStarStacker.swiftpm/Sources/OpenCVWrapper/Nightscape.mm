@@ -364,6 +364,23 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
 //  判定結果
 // ─────────────────────────────────────────────
 
+/// 空の割合をガウスぼかしでなだらかにする（半径＝標準偏差。比較明の境界ぼかし（Core Image）と同じ強さ）。
+/// 大きくぼかすときは縮小してからぼかす（なだらかなので縮小しても変わらず、計算が軽い）
+static cv::Mat FeatherAlpha(const cv::Mat &alpha, double radius) {
+    const double maxSigma = 8.0;
+    cv::Mat blurred;
+    if (radius <= maxSigma) {
+        cv::GaussianBlur(alpha, blurred, cv::Size(0, 0), radius, radius, cv::BORDER_REPLICATE);
+    } else {
+        const double scale = maxSigma / radius;
+        cv::Mat small;
+        cv::resize(alpha, small, cv::Size(), scale, scale, cv::INTER_AREA);
+        cv::GaussianBlur(small, small, cv::Size(0, 0), maxSigma, maxSigma, cv::BORDER_REPLICATE);
+        cv::resize(small, blurred, alpha.size(), 0, 0, cv::INTER_LINEAR);
+    }
+    return blurred;
+}
+
 @implementation NightscapeMask
 
 - (instancetype)initWithSkyAlpha:(NSData *)skyAlpha width:(NSInteger)width height:(NSInteger)height {
@@ -394,19 +411,7 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
 - (NightscapeMask *)maskByFeatheringWithRadius:(double)radius {
     if (radius <= 0) return self;
     const cv::Mat alpha((int)_height, (int)_width, CV_32F, (void *)_skyAlpha.bytes);
-    // 比較明の境界ぼかし（Core Image のガウスぼかし、半径＝標準偏差）と同じ強さにする。
-    // 大きくぼかすときは縮小してからぼかす（なだらかなので縮小しても変わらず、計算が軽い）
-    const double maxSigma = 8.0;
-    cv::Mat blurred;
-    if (radius <= maxSigma) {
-        cv::GaussianBlur(alpha, blurred, cv::Size(0, 0), radius, radius, cv::BORDER_REPLICATE);
-    } else {
-        const double scale = maxSigma / radius;
-        cv::Mat small;
-        cv::resize(alpha, small, cv::Size(), scale, scale, cv::INTER_AREA);
-        cv::GaussianBlur(small, small, cv::Size(0, 0), maxSigma, maxSigma, cv::BORDER_REPLICATE);
-        cv::resize(small, blurred, alpha.size(), 0, 0, cv::INTER_LINEAR);
-    }
+    cv::Mat blurred = FeatherAlpha(alpha, radius);
     if (!blurred.isContinuous()) blurred = blurred.clone();
     // 合成に使う空・地上の範囲はぼかす前の判定のまま（ぼかしは仕上げの重ね合わせだけに効かせる）
     NightscapeMask *feathered = [[NightscapeMask alloc] initWithSkyAlpha:_skyAlpha width:_width height:_height
@@ -843,6 +848,7 @@ static void MedianAndTolerance(const std::vector<cv::Mat> &samples, const std::v
     _rejectionLowSigma = 3;
     _rejectionHighSigma = 3;
     _maximumRelativeShift = 0;
+    _groundSideFeatherRadius = 0;
     if (_rejecting) [self prepareRejectionFrom:samples];
     return self;
 }
@@ -972,7 +978,7 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
         if (error) *error = NightscapeError(1, @"地上固定フレームの画素データが不正です");
         return nil;
     }
-    const cv::Mat alpha(size, CV_32F, (void *)_mask.skyAlpha.bytes);
+    cv::Mat alpha(size, CV_32F, (void *)_mask.skyAlpha.bytes);
     const int longSide = std::max(_width, _height);
 
     // 空と地上の層（重みで割った平均）。空のデータが無い画素（地平線のすぐ上など）は星のない空（地上の層）で埋める
@@ -1011,6 +1017,12 @@ static void Accumulate(cv::Mat &sum, cv::Mat &weightSum, const cv::Mat &image, c
     // 地上の明るい灯り（漁火など）のにじみ・光条は、星に合わせると星と地上の動きの差だけ流れて伸びる。
     // 灯りの周り（動きの差ほどの範囲）は、空の背景を光害フレーム（地上に合わせた層）にし、星だけ重ねる
     const cv::Mat groundFixedLight = BrightGroundLightWeight(lightPollution, hasGround, _maximumRelativeShift);
+    // 地上固定フレームを使うときの境界ぼかしは、地上側にだけ広げる: 境界の近くの地上を、Light から合成した
+    // 地上（空の層の地上側。ノイズが少ない）から地上固定フレームへなだらかに移し、ノイズと色味の段差をなじませる。
+    // 空側（星）は変えない
+    if (groundRGB && _groundSideFeatherRadius > 0) {
+        alpha = cv::max(alpha, FeatherAlpha(alpha, _groundSideFeatherRadius));
+    }
 
     NSMutableData *output = [NSMutableData dataWithLength:(NSUInteger)size.area() * 3 * sizeof(uint16_t)];
     uint16_t *out = (uint16_t *)output.mutableBytes;
