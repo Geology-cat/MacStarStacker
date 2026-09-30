@@ -98,7 +98,7 @@ final class SigmaClippingTests: XCTestCase {
         state.enableSigmaClipping = false
         state.stackMode = "Average"
         let controller = SettingsViewController()
-        controller.loadViewIfNeeded()
+        _ = controller.view  // loadViewIfNeeded() は macOS 14 以降
         func views() -> [NSView] {
             var result: [NSView] = []
             var stack: [NSView] = [controller.view]
