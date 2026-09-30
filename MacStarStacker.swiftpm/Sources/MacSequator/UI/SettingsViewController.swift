@@ -74,7 +74,7 @@ public class SettingsViewController: NSViewController {
     )
     /// 新星景モード・比較明でのマスクの使い方の説明
     private let skyGroundHintLabel = NSTextField(wrappingLabelWithString: "")
-    /// 新星景モードで空と地上を自動判定し直すボタン（比較明では高さを0にして隠す）
+    /// 新星景モードの「解析開始」ボタン（比較明では高さを0にして隠す）
     private let analyzeNightscapeButton = NSButton()
     private var analyzeNightscapeButtonHeight: NSLayoutConstraint?
     private var analyzeNightscapeButtonSpacing: NSLayoutConstraint?
@@ -282,7 +282,7 @@ public class SettingsViewController: NSViewController {
         analyzeNightscapeButton.font = NSFont.systemFont(ofSize: 11)
         analyzeNightscapeButton.target = self
         analyzeNightscapeButton.action = #selector(onAnalyzeNightscapeClicked)
-        analyzeNightscapeButton.toolTip = "全フレームを位置合わせして空と地上を自動で判定し直します（ブラシで塗った所は残ります）"
+        analyzeNightscapeButton.toolTip = "全フレームを位置合わせして空と地上を自動で判定します（ブラシで塗った所は残ります）。解析の結果はスタッキングで使い回します"
 
         brushModeSegmented.translatesAutoresizingMaskIntoConstraints = false
         brushModeSegmented.segmentCount = 3
@@ -847,17 +847,17 @@ public class SettingsViewController: NSViewController {
         } else if state.enableSkyGroundMask && !state.nightscapeAnalysisStatus.isEmpty {
             skyGroundHintLabel.stringValue = state.nightscapeAnalysisStatus
         } else {
-            skyGroundHintLabel.stringValue = "ONにすると全フレームを解析して空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
+            skyGroundHintLabel.stringValue = "「解析開始」を押すと、全フレームを解析して空と地上を自動で塗り分けます。違う所はブラシで直してからスタッキングを開始してください。"
         }
         skyGroundHintLabel.isEnabled = state.enableSkyGroundMask
-        // 自動判定し直すボタン（新星景モードのときだけ表示）
+        // 解析開始ボタン（新星景モードのときだけ表示）
         let showsAnalyzeButton = !isCompareBright
         analyzeNightscapeButton.isHidden = !showsAnalyzeButton
         analyzeNightscapeButtonHeight?.constant = showsAnalyzeButton ? 24 : 0
         analyzeNightscapeButtonSpacing?.constant = showsAnalyzeButton ? 6 : 0
         analyzeNightscapeButton.title = state.isAnalyzingNightscape
-            ? "判定中 (\(Int(state.nightscapeAnalysisProgress * 100))%)..."
-            : "空と地上を自動判定し直す"
+            ? "解析中 (\(Int(state.nightscapeAnalysisProgress * 100))%)..."
+            : "解析開始"
         analyzeNightscapeButton.isEnabled = state.isNightscapeActive && !state.isAnalyzingNightscape && !state.isStacking
             && lightCount >= 2 && state.baseImage != nil
         switch state.brushMode {

@@ -219,9 +219,14 @@ extension StackingPipelineTests {
             state.maskBitmap = nil
         }
 
-        // ONにすると自動で解析し、判定結果を基準画像の上にブラシで直せるマスクとして表示する
+        // ONにしただけでは解析しない（「解析開始」で解析する）
         let before = preparedAnalysis(state)
         state.enableSkyGroundMask = true
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        XCTAssertFalse(state.isAnalyzingNightscape, "ONにしただけで解析が始まった")
+        XCTAssertTrue(preparedAnalysis(state) === before)
+        // 解析すると、判定結果を基準画像の上にブラシで直せるマスクとして表示する
+        state.analyzeNightscape()
         waitForNightscapeAnalysis(state, replacing: before)
         XCTAssertFalse(state.isAnalyzingNightscape)
         let prepared = try XCTUnwrap(state.nightscapePrepared, state.nightscapeAnalysisStatus)

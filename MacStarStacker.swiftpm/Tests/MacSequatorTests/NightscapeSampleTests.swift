@@ -96,4 +96,35 @@ final class NightscapeSampleTests: XCTestCase {
         print("demosaic \(frame.width)x\(frame.height)")
         try frame.pixels.withUnsafeBytes { Data($0) }.write(to: URL(fileURLWithPath: outputPath))
     }
+
+    /// 解析（空と地上の自動判定）だけを行い、判定結果を書き出す。RAW でなければ現像済み画像として解析する
+    func testAnalyzeSampleFolder() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let sample = environment["NIGHTSCAPE_ANALYZE_DIR"], let outputPath = environment["NIGHTSCAPE_OUTPUT_DIR"] else {
+            throw XCTSkip("NIGHTSCAPE_ANALYZE_DIR と NIGHTSCAPE_OUTPUT_DIR を指定したときだけ実行する")
+        }
+        let lights = try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: sample), includingPropertiesForKeys: nil)
+            .filter { ["cr2", "dng", "nef", "arw", "jpg", "jpeg", "tif", "tiff"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let output = URL(fileURLWithPath: outputPath)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let baseIndex = Int(environment["NIGHTSCAPE_BASE_INDEX"] ?? "") ?? lights.count / 2
+        let state = StackingStateController.shared
+        state.images = [.light: lights.map { ImageFile(url: $0) }, .dark: [], .flat: [], .bias: []]
+        state.baseImage = state.images[.light]?[baseIndex]
+        state.stackMode = "Average"
+        state.maskBitmap = nil
+        state.enableSkyGroundMask = true
+        defer { state.enableSkyGroundMask = false }
+        let start = Date()
+        state.analyzeNightscape()
+        while state.isAnalyzingNightscape && Date().timeIntervalSince(start) < 900 {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+        }
+        print("解析時間: \(Date().timeIntervalSince(start))秒 状況: \(state.nightscapeAnalysisStatus)")
+        let mask = try XCTUnwrap(state.maskBitmap)
+        let png = try XCTUnwrap(NSBitmapImageRep(cgImage: try XCTUnwrap(mask.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+            .representation(using: .png, properties: [:]))
+        try png.write(to: output.appendingPathComponent("analysis_mask.png"))
+    }
 }
