@@ -18,8 +18,10 @@ const double kDetailSigma = 2.0;
 const uint64_t kGrabCutSeed = 0x4E6967687473ULL;
 /// 塗った手がかりの縁の幅（判定用の画像の長辺に対する割合）。縁は「おそらくその側」として本当の境界に吸い付かせる
 const double kHintRimFraction = 0.02;
-/// 空の手がかり（動く星）からこの距離（判定用の画像の長辺に対する割合）より離れた画素は、初めは地上寄りとみなす
-const double kStarSupportDistance = 0.03;
+/// 空の手がかりどうしをつなぐ距離（判定用の画像の長辺に対する割合）。これでつないで上辺に届かず、面積も小さいものは除く
+const double kSkySeedLinkFraction = 0.02;
+/// 上辺に届かなくても空の手がかりとして残す面積（判定用の画像に対する割合）
+const double kSkySeedMinimumArea = 0.005;
 
 NSError *NightscapeError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"NightscapeDomain" code:code userInfo:@{NSLocalizedDescriptionKey : message}];
@@ -152,6 +154,60 @@ cv::Mat ColorGuidedFilter(const cv::Mat &guide, const cv::Mat &p, int radius, do
     return q;
 }
 
+/// 空の手がかり（255）のうち、link px の範囲でつないだとき画面の上辺に届くか、面積が十分にあるものだけを残す
+cv::Mat KeepConnectedSky(const cv::Mat &seedSky, int link) {
+    cv::Mat joined;
+    cv::dilate(seedSky, joined, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * link + 1, 2 * link + 1)));
+    cv::Mat labels;
+    const int count = cv::connectedComponents(joined, labels, 8, CV_32S);
+    std::vector<int> area(count, 0);
+    std::vector<bool> keep(count, false);
+    for (int y = 0; y < seedSky.rows; y++) {
+        const uchar *seed = seedSky.ptr<uchar>(y);
+        const int *label = labels.ptr<int>(y);
+        for (int x = 0; x < seedSky.cols; x++) if (seed[x]) area[label[x]]++;
+    }
+    const int *top = labels.ptr<int>(0);
+    for (int x = 0; x < seedSky.cols; x++) keep[top[x]] = true;
+    const double minimumArea = kSkySeedMinimumArea * (double)seedSky.total();
+    for (int i = 1; i < count; i++) if (area[i] >= minimumArea) keep[i] = true;
+    keep[0] = false;
+    cv::Mat result = cv::Mat::zeros(seedSky.size(), CV_8U);
+    for (int y = 0; y < seedSky.rows; y++) {
+        const uchar *seed = seedSky.ptr<uchar>(y);
+        const int *label = labels.ptr<int>(y);
+        uchar *out = result.ptr<uchar>(y);
+        for (int x = 0; x < seedSky.cols; x++) if (seed[x] && keep[label[x]]) out[x] = 255;
+    }
+    return result;
+}
+
+/// 空と地上の手がかりから、画像の輪郭を壁にして塗り広げる（分水嶺）。空の割合 255 を返す。
+/// 地上はふつう画面の下辺に、空は上辺につながるため、下辺（空の手がかりの所を除く）を地上、上辺（地上の手がかりの
+/// 近くを除く）を空の起点にも加える。手がかりの無い所は、輪郭を越えずにたどり着ける側になる
+cv::Mat FloodFromSeeds(const cv::Mat &image8, const cv::Mat &seedSky, const cv::Mat &seedGround) {
+    const int rows = seedSky.rows, cols = seedSky.cols;
+    cv::Mat markers = cv::Mat::zeros(seedSky.size(), CV_32S);
+    markers.setTo(1, seedSky & ~seedGround);
+    markers.setTo(2, seedGround);
+    const int edge = std::max(1, (int)std::lround(0.002 * std::max(rows, cols)));
+    const cv::Rect bottom(0, rows - edge, cols, edge), top(0, 0, cols, edge);
+    cv::Mat bottomMarkers = markers(bottom);
+    bottomMarkers.setTo(2, seedSky(bottom) == 0);
+    cv::Mat nearGround;
+    const int reach = std::max(2, (int)std::lround(0.01 * std::max(rows, cols)));
+    cv::dilate(seedGround, nearGround, cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(2 * reach + 1, 2 * reach + 1)));
+    cv::Mat topMarkers = markers(top);
+    topMarkers.setTo(1, (topMarkers == 0) & (nearGround(top) == 0));
+    cv::watershed(image8, markers);
+    cv::Mat sky = markers == 1;
+    // 分水嶺の境界（-1）は、まわりに空があれば空にする
+    cv::Mat border = markers == -1, grown;
+    cv::dilate(sky, grown, cv::Mat::ones(3, 3, CV_8U));
+    grown.copyTo(sky, border);
+    return sky;
+}
+
 /// 塗った手がかり（255）の内側（縁を rim px 除いた所）。keepThin なら、縁を除くと消えてしまう細い塗りはそのまま残す
 cv::Mat HintCore(const cv::Mat &painted, int rim, bool keepThin) {
     cv::Mat core;
@@ -221,17 +277,19 @@ cv::Mat RefineBoundaryInTiles(const cv::Mat &guide01, const cv::Mat &binarySky, 
     return refined;
 }
 
-/// 地上の手がかり（255）を、各フレームの星と地上のずれ（relative: 星に合わせた座標 → 地上に合わせた座標）と
-/// その逆向きに動かしても手がかりのままの画素だけに縮める。画像の外は手がかりとみなす（縁で縮めすぎない）
+/// 地上の手がかり（255）から、星に合わせたときに地上が通り過ぎて紛れ込んだ空（稜線の上の「炎」）を除く。
+/// 星に合わせた座標 x には、各フレームで地上に合わせた座標 R_k x（relative）の景色が写るため、手がかりは
+/// 本当の地上 G を R_k の逆向きに広げたもの（x について R_k x が G に入るフレームがある）になる。
+/// 同じずれで縮める（seed(R_k^-1 x) がすべてのフレームで手がかりのままの画素だけ残す）と G に戻る。
+/// ずれの向きだけ縮めるので、基準画像が撮影の端（ずれが片側だけ大きい）でも反対側の地上を削らない。
+/// 画像の外は手がかりとみなす（縁で縮めすぎない）
 cv::Mat ErodeByRelativeMotion(const cv::Mat &seed, const std::vector<cv::Matx33d> &relative) {
     cv::Mat result = seed.clone(), moved;
     for (const cv::Matx33d &r : relative) {
-        for (const cv::Matx33d &m : {r, r.inv()}) {
-            // moved(x) = seed(m * x)
-            cv::warpPerspective(seed, moved, m, seed.size(), cv::INTER_NEAREST | cv::WARP_INVERSE_MAP,
-                                cv::BORDER_CONSTANT, cv::Scalar(255));
-            cv::min(result, moved, result);
-        }
+        // moved(x) = seed(R^-1 * x)
+        cv::warpPerspective(seed, moved, r.inv(), seed.size(), cv::INTER_NEAREST | cv::WARP_INVERSE_MAP,
+                            cv::BORDER_CONSTANT, cv::Scalar(255));
+        cv::min(result, moved, result);
     }
     return result;
 }
@@ -476,19 +534,23 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     cv::boxFilter(groundVariance, groundSpread, CV_32F, cv::Size(7, 7));
     // ノイズによるばらつき（どちらかに合わせればノイズだけになる画素が多いため、小さい方の中央値）
     const float noise = std::max(1e-6f, Median(cv::min(starSpread, groundSpread)));
-    cv::Mat difference = (groundSpread - starSpread) / (starSpread + groundSpread + noise);
     // 確実な手がかりは、片方に合わせるとばらつき、もう片方に合わせるとノイズ程度になる画素だけ。
     // 稜線のすぐ上のように両方でばらつく画素（星が通り過ぎ、星に合わせると地上のシルエットも通る）は
     // どちらとも決めず、色で判断させる
-    cv::Mat seedSky = (groundSpread > 4.0f * noise) & (starSpread < 0.5f * groundSpread);
+    // 空は星に合わせるとノイズ程度まで一定になる。明滅する灯りや動く人・車の灯りは地上に合わせてもばらつくが、
+    // 星に合わせても（地上が動くため）一定にならないので、空の手がかりにしない
+    cv::Mat seedSky = (groundSpread > 4.0f * noise) & (starSpread < 0.5f * groundSpread) & (starSpread < 3.0f * noise);
     cv::Mat seedGround = (starSpread > 4.0f * noise) & (groundSpread < 0.5f * starSpread);
     cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
     cv::morphologyEx(seedSky, seedSky, cv::MORPH_OPEN, openKernel);
     cv::morphologyEx(seedGround, seedGround, cv::MORPH_OPEN, openKernel);
+    // 本当の空の手がかりは空一面に広がり、画面の上辺までつながる。地上の中に孤立した小さな手がかり
+    // （水面の反射・灯りのまわり）は除く
+    seedSky = KeepConnectedSky(seedSky, std::max(2, (int)std::lround(kSkySeedLinkFraction * std::max(_analysisSize.width, _analysisSize.height))));
     // 稜線のすぐ上の空は、星に合わせると動いた地上のシルエットが通り過ぎてばらつき、地上に合わせても
     // 星が通らない画素はばらつかないため、地上の手がかりに紛れ込む。紛れ込むのは、星に合わせた座標 x から
-    // 見て地上に合わせた座標 Hg * Hs^-1 * x が地上になるフレームがある画素なので、各フレームの星と地上のずれ
-    // （とその逆向き）だけ地上の手がかりを縮める（ずれの無い向きには縮めないため、水平線の下の海などが残る）。
+    // 見て地上に合わせた座標 Hg * Hs^-1 * x が地上になるフレームがある画素なので、各フレームの星と地上のずれの
+    // 向きにだけ地上の手がかりを縮める（ずれの無い向きには縮めないため、水平線の下の海などが残る）。
     // 最後に、ばらつきを周囲7x7で平均した分だけさらに縮める。境界付近は色で判断させる。
     // 空の手がかりは地上に合わせてばらつく画素なので、動かない地上には紛れ込まない（縮めない）
     seedGround = ErodeByRelativeMotion(seedGround, _relative);
@@ -534,14 +596,15 @@ cv::Mat HueWeightedLab(const cv::Mat &rgb01) {
     //    どちらの手がかりも無く、空と色が近いと空にされて水平線がぼけるため
     cv::Mat binarySky;
     if (hasBoth) {
-        const cv::Mat colorImage = HueWeightedLab(StretchForDisplay(RemoveBrightThinStructures(groundRGB, 5)));
-        const int longSide = std::max(_analysisSize.width, _analysisSize.height);
-        cv::Mat tendency;
-        cv::GaussianBlur(difference, tendency, cv::Size(0, 0), std::max(3.0, 0.01 * longSide));
-        cv::Mat distanceToStars;
-        cv::distanceTransform(seedSky == 0, distanceToStars, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+        const cv::Mat stretched = StretchForDisplay(RemoveBrightThinStructures(groundRGB, 5));
+        const cv::Mat colorImage = HueWeightedLab(stretched);
+        // 手がかりの無い所（なだらかな海・影の中の暗い崖など）は、色が空に似ていることが多い。
+        // まず輪郭を壁にして手がかりから塗り広げ（分水嶺）、それを色の判定（GrabCut）の初めの見立てにする
+        cv::Mat stretched8;
+        stretched.convertTo(stretched8, CV_8UC3, 255.0);
+        const cv::Mat flooded = FloodFromSeeds(stretched8, seedSky, seedGround);
         cv::Mat grabMask(_analysisSize, CV_8U, cv::Scalar(cv::GC_PR_BGD));
-        grabMask.setTo(cv::GC_PR_FGD, (tendency > 0) & (distanceToStars <= kStarSupportDistance * longSide));
+        grabMask.setTo(cv::GC_PR_FGD, flooded);
         grabMask.setTo(cv::GC_PR_FGD, rimSky);
         grabMask.setTo(cv::GC_PR_BGD, rimGround);
         grabMask.setTo(cv::GC_FGD, seedSky);

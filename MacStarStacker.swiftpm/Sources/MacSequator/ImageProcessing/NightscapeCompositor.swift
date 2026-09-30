@@ -415,10 +415,13 @@ enum NightscapeCompositor {
         let colorSpace: CGColorSpace
     }
 
+    /// 画像を線形の明るさ（ガンマなしの sRGB）の16bit RGB にする。JPEG などのガンマのかかった画像のままでは、
+    /// 明るさとノイズの関係が RAW と変わり、空と地上の判定（フレーム間のばらつき）が合わなくなるため。
+    /// 平均も線形の明るさで取る方が正しい
     static func rgb16(from image: NSImage) -> RGB16Image? {
         guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let width = cg.width, height = cg.height
-        let colorSpace = (cg.colorSpace?.model == .rgb ? cg.colorSpace : nil) ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let colorSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpace(name: CGColorSpace.sRGB)!
         var rgba = [UInt16](repeating: 0, count: width * height * 4)
         let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
             guard let context = CGContext(
