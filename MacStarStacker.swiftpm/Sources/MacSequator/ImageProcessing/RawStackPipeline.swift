@@ -662,7 +662,7 @@ enum RawStackPipeline {
         case 8: inverse = .right
         default: inverse = .up
         }
-        image = image.oriented(inverse)
+        image = image.oriented(forExifOrientation: Int32(inverse.rawValue))  // oriented(_:) は 10.13 以降
         let extent = image.extent
         let target = CGRect(x: 0, y: 0, width: info.width, height: info.height)
         return image
@@ -818,7 +818,7 @@ enum RawStackPipeline {
         }
 
         let displayOrientation = CGImagePropertyOrientation(rawValue: UInt32(info.orientation)) ?? .up
-        let oriented = CIImage(cgImage: preview).oriented(displayOrientation)
+        let oriented = CIImage(cgImage: preview).oriented(forExifOrientation: Int32(displayOrientation.rawValue))
         let orientedExtent = oriented.extent
         guard let display = displayOrientation == .up ? preview
                 : materialize(oriented, context: context, colorSpace: colorSpace) else {

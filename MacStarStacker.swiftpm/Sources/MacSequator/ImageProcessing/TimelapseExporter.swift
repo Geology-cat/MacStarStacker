@@ -70,8 +70,9 @@ struct TimelapseSettings {
 
         var avCodec: AVVideoCodecType {
             switch self {
-            case .h264: return .h264
-            case .hevc: return .hevc
+            // AVVideoCodecType.h264 / .hevc は macOS 10.13 以降のため、同じ値（avc1 / hvc1）を直接指定する
+            case .h264: return AVVideoCodecType(rawValue: AVVideoCodecH264)
+            case .hevc: return AVVideoCodecType(rawValue: "hvc1")
             }
         }
 
@@ -83,8 +84,11 @@ struct TimelapseSettings {
             }
         }
 
-        private static let isHEVCEncodingAvailable =
-            AVOutputSettingsAssistant.availableOutputSettingsPresets().contains(.hevc1920x1080)
+        /// HEVC の書き出しは macOS 10.13 以降（さらにハードウェアエンコーダーが必要）
+        private static let isHEVCEncodingAvailable: Bool = {
+            guard #available(macOS 10.13, *) else { return false }
+            return AVOutputSettingsAssistant.availableOutputSettingsPresets().contains(.hevc1920x1080)
+        }()
     }
 
     // ── Computed helpers ──────────────────────────────────────────────

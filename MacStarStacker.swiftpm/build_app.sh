@@ -6,7 +6,7 @@ set -euo pipefail
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$PROJ_DIR/../dist"
 # Package.swift の deploymentTarget と合わせる
-DEPLOYMENT_TARGET="10.13"
+DEPLOYMENT_TARGET="10.12.6"
 ARCHS=(arm64 x86_64)
 BUILD_DIR="$PROJ_DIR/.build/apple/Products/Release"
 APP_NAME="MacStarStacker"          # display name of the .app
@@ -25,11 +25,30 @@ bash "$PROJ_DIR/../scripts/build_deps.sh" "$DEPLOYMENT_TARGET"
 
 echo "=== Building release binary (${ARCHS[*]}) ==="
 cd "$PROJ_DIR"
-ARCH_ARGS=()
+# 最低対応OSはアーキテクチャごとに違う（x86_64: $DEPLOYMENT_TARGET、arm64: 11.0。Package.swift の targetTriple）ため、
+# アーキテクチャごとにビルドして lipo でまとめる。MSS_BUILD_ARCH でマニフェストの結果が変わるので、そのキャッシュは使わない
+THIN_BINS=()
 for ARCH in "${ARCHS[@]}"; do
-    ARCH_ARGS+=(--arch "$ARCH")
+    MSS_BUILD_ARCH="$ARCH" swift build -c release --arch "$ARCH" --manifest-cache none
+    THIN_BINS+=("$PROJ_DIR/.build/$ARCH-apple-macosx/release/$BIN_NAME")
 done
-swift build -c release "${ARCH_ARGS[@]}"
+BUILD_DIR="$PROJ_DIR/.build/${ARCHS[0]}-apple-macosx/release"
+BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
+BIN_SRC="$PROJ_DIR/.build/universal-release/$BIN_NAME"
+mkdir -p "$(dirname "$BIN_SRC")"
+lipo -create "${THIN_BINS[@]}" -output "$BIN_SRC"
+
+# 各アーキテクチャの最低対応OSを確かめる（SwiftPM が 10.13 に引き上げていないこと）
+for ARCH in "${ARCHS[@]}"; do
+    EXPECTED="$DEPLOYMENT_TARGET"
+    [ "$ARCH" = "arm64" ] && EXPECTED="11.0"
+    MINOS="$(otool -arch "$ARCH" -l "$BIN_SRC" | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; exit} /LC_VERSION_MIN_MACOSX/{v=1} v&&/version/{print $2; exit}')"
+    if [ "$MINOS" != "$EXPECTED" ]; then
+        echo "ERROR: $ARCH の最低対応OSが $MINOS です（$EXPECTED のはず）" >&2
+        exit 1
+    fi
+    echo "Minimum macOS ($ARCH): $MINOS"
+done
 
 echo "=== Assembling .app bundle in dist/ ==="
 mkdir -p "$DIST_DIR"
@@ -56,11 +75,11 @@ fi
 
 # 5. macOS 10.14.4 より前のOSにはSwiftランタイムが無いため、アプリに同梱する（x86_64のみ。arm64はmacOS 11以降）。
 #    実行ファイルの LC_RPATH は /usr/lib/swift が @executable_path/../Frameworks より先に並ぶため、
-#    新しいOSではOS内蔵のランタイムが使われ、同梱分は macOS 10.13〜10.14.3 でだけ読み込まれる。
+#    新しいOSではOS内蔵のランタイムが使われ、同梱分は macOS 10.12.6〜10.14.3 でだけ読み込まれる。
 SWIFT_BACKDEPLOY_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx"
 if [ ! -f "$SWIFT_BACKDEPLOY_DIR/libswiftCore.dylib" ]; then
     echo "ERROR: Swift runtime for back-deployment not found: $SWIFT_BACKDEPLOY_DIR" >&2
-    echo "       Xcode 16.x を使ってください（新しいXcodeでは10.13向けの同梱用ランタイムが無い可能性があります）" >&2
+    echo "       Xcode 16.x を使ってください（新しいXcodeでは古いmacOS向けの同梱用ランタイムが無い可能性があります）" >&2
     exit 1
 fi
 mkdir -p "$CONTENTS/Frameworks"
@@ -154,7 +173,8 @@ MacStarStacker インストール＆初回起動ガイド
 【使い方】
 「MacStarStacker使い方ガイド.pdf」に、画面の見方から新星景モードまで、画面の写真付きで説明しています。
 
-対応OS: macOS 10.13 (High Sierra) 以降（Apple Silicon Mac は macOS 11 以降）
+対応OS: macOS 10.12.6 (Sierra) 以降（Apple Silicon Mac は macOS 11 以降）
+※ macOS 10.12 では、HEIC 写真の読み込みと、H.265/HEVC の動画書き出しは使えません（macOS 10.13 以降の機能のため）。
 収録アーキテクチャ: Universal（Apple Silicon / Intel のどちらでもネイティブ動作）
 
 【古いMacでの注意】

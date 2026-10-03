@@ -1176,7 +1176,7 @@ class StackingStateController {
         guard displayOrientation != .up else {
             return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         }
-        let oriented = CIImage(cgImage: image).oriented(displayOrientation)
+        let oriented = CIImage(cgImage: image).oriented(forExifOrientation: Int32(displayOrientation.rawValue))  // oriented(_:) は 10.13 以降
         let extent = oriented.extent
         let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
         guard let rendered = context.createCGImage(

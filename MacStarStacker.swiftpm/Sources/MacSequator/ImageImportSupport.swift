@@ -15,10 +15,15 @@ private final class ImageOpenPanelDelegate: NSObject, NSOpenSavePanelDelegate {
 
 /// アプリが受け付ける画像ファイルと、ファイル／フォルダ入力の展開処理を一元管理する。
 enum ImageImportSupport {
-    static let supportedExtensions: Set<String> = [
-        "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2", "dng", "pef",
-        "tif", "tiff", "fit", "fits", "jpg", "jpeg", "png", "heic"
-    ]
+    static let supportedExtensions: Set<String> = {
+        var extensions: Set<String> = [
+            "arw", "cr2", "cr3", "nef", "raf", "orf", "rw2", "dng", "pef",
+            "tif", "tiff", "fit", "fits", "jpg", "jpeg", "png"
+        ]
+        // HEIC は macOS 10.13 以降でだけ読める
+        if #available(macOS 10.13, *) { extensions.insert("heic") }
+        return extensions
+    }()
 
     static let allowedFileTypes = supportedExtensions.sorted()
 
@@ -107,14 +112,17 @@ enum ImageImportSupport {
 final class ImageDropView: NSView {
     var onImageURLsDropped: (([URL]) -> Void)?
 
+    /// ファイルの URL のドラッグ（NSPasteboard.PasteboardType.fileURL と同じ。.fileURL は macOS 10.13 以降）
+    private static let fileURLType = NSPasteboard.PasteboardType("public.file-url")
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([Self.fileURLType])
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([Self.fileURLType])
     }
 
     private func droppedURLs(from sender: NSDraggingInfo) -> [URL] {

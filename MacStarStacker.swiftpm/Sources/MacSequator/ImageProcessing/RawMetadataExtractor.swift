@@ -292,7 +292,6 @@ public enum RawMetadataExtractor {
         guard let toolPath = exiftoolPath else { return info }
         
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: toolPath)
         process.arguments = [
             "-j",
             "-LensMake", "-LensModel", "-Lens", "-LensID", "-LensInfo", "-LensSerialNumber", "-LensSpec",
@@ -307,7 +306,7 @@ public enum RawMetadataExtractor {
         process.standardError = Pipe()
         
         do {
-            try process.run()
+            try start(process, executable: toolPath)
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let jsonArray = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
@@ -395,7 +394,6 @@ public enum RawMetadataExtractor {
         ]
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: exiftool)
         // タグ代入は -tagsFromFile のコピーより後ろに置くことで、コピー結果を上書きできる。
         process.arguments = ["-tagsFromFile", sourceURL.path] + copiedTags + extraArguments
             + ["-overwrite_original", targetURL.path]
@@ -404,7 +402,7 @@ public enum RawMetadataExtractor {
         process.standardError = FileHandle.nullDevice
 
         do {
-            try process.run()
+            try start(process, executable: exiftool)
             process.waitUntilExit()
         } catch {
             // 同期失敗時はネイティブ生成されたファイルのままで問題なし
@@ -413,6 +411,21 @@ public enum RawMetadataExtractor {
     }
 
     /// システム上の exiftool の実行可能パスを探す
+    /// 外部のコマンドを起動する。executableURL・run() は macOS 10.13 以降のため、それより前は launchPath・launch() を使う
+    /// （launch() は起動できないと例外で止まるため、先に実行できるファイルか確かめる）
+    private static func start(_ process: Process, executable path: String) throws {
+        if #available(macOS 10.13, *) {
+            process.executableURL = URL(fileURLWithPath: path)
+            try process.run()
+        } else {
+            guard FileManager.default.isExecutableFile(atPath: path) else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: path])
+            }
+            process.launchPath = path
+            process.launch()
+        }
+    }
+
     public static func findExiftool() -> String? {
         let candidates = [
             "/usr/local/bin/exiftool",
