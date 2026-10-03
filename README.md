@@ -6,7 +6,7 @@ Windows用ソフトウェア「Sequator」のように、星の日周運動を�
 macOS 14 (Sonoma) 以降に対応しています（macOS 15.7でビルド・検証）。
 配布DMGはUniversal版（Apple Silicon / Intel のどちらでもネイティブ動作）です。
 
-> macOS 10.13 (High Sierra) 以降に対応した版は `macos10.13` ブランチで開発しています。
+> 古いMac向けの版（Intel の Mac は macOS 10.12.6 Sierra 以降、Apple シリコンの Mac は macOS 11 以降）は `macos10.13` ブランチで開発しています（ブランチ名は 10.13 のまま）。
 
 📘 **使い方ガイド**: [`docs/MacStarStacker使い方ガイド.pdf`](docs/MacStarStacker使い方ガイド.pdf)（画面の写真付きで、はじめての方向けに説明しています。配布DMGにも同梱）
 
