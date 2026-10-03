@@ -28,6 +28,17 @@ class MetalStacker {
         cachedInstance
     }
 
+    /// シェーダーのある資源バンドル。配布するアプリでは Contents/Resources に置く。
+    /// SwiftPM の Bundle.module は（アーキテクチャごとにビルドしたとき）アプリの直下とビルドフォルダしか探さず、
+    /// 見つからないとアプリが止まるため、先にアプリの Contents/Resources を探す
+    private static var resourceBundle: Bundle {
+        if let url = Bundle.main.resourceURL?.appendingPathComponent("MacSequator_MacSequator.bundle"),
+           let bundle = Bundle(url: url) {
+            return bundle
+        }
+        return .module  // swift test・swift run（ビルドフォルダから動かすとき）
+    }
+
     private static func makeInstance() -> MetalStacker? {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue  = device.makeCommandQueue() else { return nil }
@@ -36,9 +47,9 @@ class MetalStacker {
         // バンドル内ソースを一度だけコンパイルしてキャッシュする。
         let library: MTLLibrary
         do {
-            library = try device.makeDefaultLibrary(bundle: .module)
+            library = try device.makeDefaultLibrary(bundle: resourceBundle)
         } catch {
-            guard let sourceURL = Bundle.module.url(forResource: "Stacking", withExtension: "metal"),
+            guard let sourceURL = resourceBundle.url(forResource: "Stacking", withExtension: "metal"),
                   let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
                 print("MetalStacker: Metalシェーダーを読み込めませんでした: \(error.localizedDescription)")
                 return nil
