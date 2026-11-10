@@ -32,7 +32,7 @@ enum TrailColorCorrector {
         let units = g.unitCount
         let uw = g.unitsWide, uh = g.unitsHigh
 
-        // 1. 単位ごとの色（ホワイトバランス後）と明るさ
+        // 1. 単位ごとの色（ホワイトバランス後、色の画素の数で割った平均）と明るさ
         var colorCount = [Float](repeating: 0, count: 3)
         for c in colors { colorCount[c] += 1 }
         guard colorCount.allSatisfy({ $0 > 0 }) else { return }
@@ -51,18 +51,25 @@ enum TrailColorCorrector {
                     }
                 }
             }
-            channels[c] = BrightStacker.boxMean(channels[c], uw, uh, 1)
         }
+        // 明るさ（光跡の向き・置き換える割合に使う）は 3x3 単位で平均する
         var luminance = [Float](repeating: 0, count: units)
-        for u in 0..<units { luminance[u] = (channels[0][u] + channels[1][u] + channels[2][u]) / 3 }
+        do {
+            let near = (0..<3).map { BrightStacker.boxMean(channels[$0], uw, uh, 1) }
+            for u in 0..<units { luminance[u] = (near[0][u] + near[1][u] + near[2][u]) / 3 }
+        }
         // 光跡が無ければ何もしない
         guard luminance.contains(where: { $0 >= threshold }) else { return }
+        // 色は 5x5 単位（10画素）で平均して、光跡の断面を位置によらず丸ごと数える
+        // （狭いと、光跡が単位のどこを通るかで R・G・B の数え方が偏り、平均した色がずれる）
+        for c in 0..<3 { channels[c] = BrightStacker.boxMean(channels[c], uw, uh, 2) }
         let channel = channels
 
         // 2. 光跡の向き（構造テンソルの、明るさの変化が小さい方向）と、線らしさ（0〜1）
         let (directionX, directionY, coherence) = orientation(luminance, uw, uh, radius: g.unitRadius(3))
 
-        // 3. 光跡に沿って色を平均する（明るさで重み付け）
+        // 3. 光跡に沿って色を平均する。光跡の上の各点で、断面方向に3点（中心と ±1 単位）を同じ重みで足す
+        //    （明るさで重み付けすると、光跡が単位の中心を通る所ばかり数えて色が偏る）
         let steps = max(1, Int((options.length / Float(g.unitSize)).rounded()))
         var chromaR = [Float](repeating: 1, count: units), chromaG = chromaR, chromaB = chromaR
         var weight = [Float](repeating: 0, count: units)
@@ -85,15 +92,20 @@ enum TrailColorCorrector {
                                             let ix = Int(px), iy = Int(py)
                                             guard px >= 0, py >= 0, ix < uw, iy < uh else { break }
                                             let v = iy * uw + ix
-                                            let w = luminance[v]
+                                            let onTrail = luminance[v] >= threshold * 0.25
                                             // 出発点は片側だけで数える
-                                            if step > 0 || sign > 0 {
-                                                sums.0 += channel[0][v] * w
-                                                sums.1 += channel[1][v] * w
-                                                sums.2 += channel[2][v] * w
+                                            if onTrail && (step > 0 || sign > 0) {
+                                                for offset: Float in [-1, 0, 1] {
+                                                    let sx = px - dy * offset, sy = py + dx * offset
+                                                    guard sx >= 0, sy >= 0, Int(sx) < uw, Int(sy) < uh else { continue }
+                                                    let q = Int(sy) * uw + Int(sx)
+                                                    sums.0 += channel[0][q]
+                                                    sums.1 += channel[1][q]
+                                                    sums.2 += channel[2][q]
+                                                }
                                             }
                                             // 光跡から外れて暗い所が続いたらやめる（隣の光跡の色を混ぜない）
-                                            dark = w < threshold * 0.25 ? dark + 1 : 0
+                                            dark = onTrail ? 0 : dark + 1
                                             if dark >= 3 { break }
                                             // 向きを読み直す（曲がった光跡に沿う）。向きの符号は進んできた方にそろえる
                                             var nx = directionX[v], ny = directionY[v]
