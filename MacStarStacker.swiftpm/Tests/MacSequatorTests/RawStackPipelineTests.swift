@@ -190,9 +190,12 @@ final class RawStackPipelineTests: XCTestCase {
         return pixels
     }
 
-    private func brightStacker(width: Int, height: Int, options: BrightStacker.Options = BrightStacker.Options()) -> StreamingStacker {
-        StreamingStacker(mode: .compareBright, count: width * height,
-                         grouping: .bayerBlocks(width: width, height: height, weights: brightWeights), brightOptions: options)
+    /// アプリと同じ設定（重み付きの黒レベルを引いてから明るさを比べる）の比較明合成
+    private func brightStacker(width: Int, height: Int, options: BrightStacker.Options? = nil) -> StreamingStacker {
+        var settings = options ?? BrightStacker.Options()
+        if options == nil { settings.scoreOffset = brightWeights.map { $0 * Float(black) }.reduce(0, +) }
+        return StreamingStacker(mode: .compareBright, count: width * height,
+                                grouping: .bayerBlocks(width: width, height: height, weights: brightWeights), brightOptions: settings)
     }
 
     func testCompareBrightUsesBayerBlockStacker() throws {
@@ -248,14 +251,61 @@ final class RawStackPipelineTests: XCTestCase {
             stacker.add(noisyBayer(width: width, height: height, values: index % 2 == 0 ? sky : cloud, sigma: 20, random: &random))
         }
         let result = stacker.result()
-        var reds: [Double] = []
+        var reds: [Double] = [], blues: [Double] = []
         for y in stride(from: 0, to: height, by: 2) {
-            for x in stride(from: 0, to: width, by: 2) { reds.append(Double(result[y * width + x])) }
+            for x in stride(from: 0, to: width, by: 2) {
+                reds.append(Double(result[y * width + x]))
+                blues.append(Double(result[(y + 1) * width + x + 1]))
+            }
         }
         let mean = reds.reduce(0, +) / Double(reds.count)
         let deviation = (reds.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(reds.count)).squareRoot()
+        let blueMean = blues.reduce(0, +) / Double(blues.count)
         XCTAssertLessThan(deviation, 30, "雲と空がブロックごとに入れ替わらない（まだらにならない）")
-        XCTAssertLessThan(mean, 800, "雲のRと空のBを混ぜた色（紫）にならない")
+        // 明るさの近い雲と空は同じ重みで混ざる（R・B とも中間）。色ごとの最大値（雲のRと空のB＝紫）にはならない
+        XCTAssertLessThan(mean, 1000, "雲のRをそのまま採っていない")
+        XCTAssertLessThan(blueMean, 1400, "空のBをそのまま採っていない")
+    }
+
+    func testCompareBrightFadesBetweenCloudAndDawnSkyWithoutAHardEdge() {
+        // 灰色の雲（左ほど明るい）と夜明けの青空（右ほど明るい）のフレーム。中央で明るさが入れ替わる。
+        // 1枚を選ぶと、入れ替わる所で色が急に切り替わって境目がくっきり出る
+        let width = 128, height = 48
+        var random = Gaussian(seed: 17)
+        let stacker = brightStacker(width: width, height: height)
+        // 1・2枚目は同じ雲（ノイズの大きさを最初の2枚の差から求めるため、実際の撮影と同じく似たフレームにする）
+        for isCloud in [true, true, false, false, true, false] {
+            var pixels = [UInt16](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let position = (y & 1) << 1 | (x & 1)
+                    let t = Double(x) / Double(width)
+                    let value = isCloud
+                        ? [1100.0, 1000, 1000, 1000][position] * (1.6 - 1.2 * t)  // 雲
+                        : [600.0, 1000, 1000, 1500][position] * (0.4 + 1.2 * t)   // 空
+                    pixels[y * width + x] = UInt16(Double(black) + value + 10 * random.next())
+                }
+            }
+            stacker.add(pixels)
+        }
+        let result = stacker.result()
+        // ブロックの列ごとの R・B の平均（行方向に平均）
+        var reds = [Double](repeating: 0, count: width / 2), blues = reds
+        for y in stride(from: 0, to: height, by: 2) {
+            for bx in 0..<(width / 2) {
+                reds[bx] += Double(result[y * width + bx * 2]) / Double(height / 2)
+                blues[bx] += Double(result[(y + 1) * width + bx * 2 + 1]) / Double(height / 2)
+            }
+        }
+        // 境目から離れた所での変化と比べて、隣どうしの差が飛び抜けて大きい所（くっきりした境目）が無いこと
+        let redSteps = (1..<(width / 2 - 4)).dropFirst(4).map { abs(reds[$0] - reds[$0 - 1]) }
+        let blueSteps = (1..<(width / 2 - 4)).dropFirst(4).map { abs(blues[$0] - blues[$0 - 1]) }
+        func median(_ values: [Double]) -> Double { values.sorted()[values.count / 2] }
+        XCTAssertLessThan(redSteps.max()!, 4 * median(redSteps), "雲と空の間で R が急に切り替わっている")
+        XCTAssertLessThan(blueSteps.max()!, 4 * median(blueSteps), "雲と空の間で B が急に切り替わっている")
+        // 両端は明るい方のフレームの色（左は雲の灰色、右は空の青）
+        XCTAssertGreaterThan(reds[2] - Double(black), blues[2] - Double(black), "左端は雲（R が B より明るい）")
+        XCTAssertGreaterThan(blues[width / 2 - 3] - Double(black), reds[width / 2 - 3] - Double(black), "右端は空（B が R より明るい）")
     }
 
     func testCompareBrightKeepsStarTrailContinuousAcrossFrameJoints() {
@@ -338,16 +388,18 @@ final class RawStackPipelineTests: XCTestCase {
             }
         }
         let red = lift[0] / counts[0], green = (lift[1] + lift[2]) / (counts[1] + counts[2]), blue = lift[3] / counts[3]
-        // 明るさの近いフレームを混ぜるため、1枚を選ぶよりノイズによる底上げは小さい（それでも明るくはなる）
-        XCTAssertGreaterThan(green, 2, "比較明合成はノイズの分だけ明るくなる")
-        XCTAssertEqual(red / green, 1, accuracy: 0.2, "赤だけ持ち上がるとマゼンタに転ぶ")
-        XCTAssertEqual(blue / green, 1, accuracy: 0.2, "青だけ持ち上がるとマゼンタに転ぶ")
+        // 明るさの近いフレームは混ぜる（ノイズだけの所はほぼ平均になる）ため、底上げはほとんど無い。
+        // 色ごとの最大値を取ると、WB後に R が約2倍・B が約1.7倍持ち上がって（40×2.0σ前後）マゼンタに転ぶ
+        XCTAssertEqual(green, 0, accuracy: 10, "ノイズの最大値で底上げしない")
+        XCTAssertEqual(red - green, 0, accuracy: 4, "赤だけ持ち上がるとマゼンタに転ぶ")
+        XCTAssertEqual(blue - green, 0, accuracy: 4, "青だけ持ち上がるとマゼンタに転ぶ")
     }
 
     func testCompareBrightKeepsBrightestRGBPixelWeightedByWhiteBalance() {
-        // 明るさを比べる前にまわりで平均しない（2画素だけの画像で、画素ごとの選び方を見る）
+        // 明るさを比べる前にまわりで平均せず、明るさの比で混ぜない（2画素だけの画像で、画素ごとの選び方を見る）
         var options = BrightStacker.Options()
         options.smoothingRadius = 0
+        options.blendRange = 0
         let stacker = StreamingStacker(mode: .compareBright, count: 6, grouping: .rgbPixels(width: 2, height: 1, weights: [0.5, 1, 0.6]),
                                        brightOptions: options)
         stacker.add([1000, 100, 1000, /**/ 10, 10, 10])
@@ -530,7 +582,8 @@ final class RawStackPipelineTests: XCTestCase {
 
         let result = try XCTUnwrap(RawStackPipeline.stack(input(lights: [a, b], mode: .compareBright, mask: mask)) { _, _ in })
         XCTAssertEqual(result.pixels[10 * width + 5], 2000, "地上（左）は平均")
-        XCTAssertEqual(result.pixels[10 * width + 60], 3000, "空（右）は比較明")
+        // 空は比較明（明るさの比が近い暗いフレームも少し混ざるため、3000 よりわずかに暗い）
+        XCTAssertEqual(Double(result.pixels[10 * width + 60]), 3000, accuracy: 100, "空（右）は比較明")
 
         // 上下が非対称なマスク（下半分が地上）で、上下が反転しないこと
         for y in 0..<height {
@@ -547,7 +600,7 @@ final class RawStackPipelineTests: XCTestCase {
         let vertical = NSImage(cgImage: verticalCG, size: NSSize(width: width, height: height))
         let verticalResult = try XCTUnwrap(RawStackPipeline.stack(input(lights: [a, b], mode: .compareBright, mask: vertical)) { _, _ in })
         XCTAssertEqual(verticalResult.pixels[40 * width + 30], 2000, "地上（下）は平均")
-        XCTAssertEqual(verticalResult.pixels[5 * width + 30], 3000, "空（上）は比較明")
+        XCTAssertEqual(Double(verticalResult.pixels[5 * width + 30]), 3000, accuracy: 100, "空（上）は比較明")
     }
 
     func testSkyGroundMaskFollowsPortraitOrientation() throws {
@@ -576,7 +629,7 @@ final class RawStackPipelineTests: XCTestCase {
         let result = try XCTUnwrap(RawStackPipeline.stack(input(lights: [a, b], mode: .compareBright, mask: mask)) { _, _ in })
         // 時計回り90°回転では、表示の下半分 = センサーの右半分（x >= 32）
         XCTAssertEqual(result.pixels[10 * 64 + 60], 2000, "表示の下（地上）= センサー右側は平均")
-        XCTAssertEqual(result.pixels[10 * 64 + 4], 3000, "表示の上（空）= センサー左側は比較明")
+        XCTAssertEqual(Double(result.pixels[10 * 64 + 4]), 3000, accuracy: 100, "表示の上（空）= センサー左側は比較明")
         // 表示用画像は撮影時の向き（縦位置）、プレビューはセンサーの向き
         XCTAssertEqual(result.displayImage.size.width, 48)
         XCTAssertEqual(result.displayImage.size.height, 64)

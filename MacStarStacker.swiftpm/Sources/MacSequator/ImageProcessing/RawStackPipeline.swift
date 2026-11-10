@@ -216,9 +216,10 @@ enum RawStackPipeline {
         progress: Progress
     ) throws -> RawStackResult {
         let total = input.lights.count
+        let bayerWeights = brightWeights(info, colors: info.cfaPattern)
         let skyStacker = StreamingStacker(mode: input.mode, count: pixelCount, clipping: input.averageClipping,
-                                          grouping: .bayerBlocks(width: info.width, height: info.height,
-                                                                 weights: brightWeights(info, colors: info.cfaPattern)))
+                                          grouping: .bayerBlocks(width: info.width, height: info.height, weights: bayerWeights),
+                                          brightOptions: brightOptions(weights: bayerWeights, blacks: info.blackLevels.map(Float.init)))
         // 地上側は固定構図のままノイズを減らす（比較明の場合は平均）
         let groundMode: Mode = input.mode == .median ? .median : .average
         let groundStacker = (input.skyGroundMask != nil && groundMode != input.mode)
@@ -302,9 +303,11 @@ enum RawStackPipeline {
             throw PipelineError(message: "星の位置合わせを準備できませんでした（\(error.localizedDescription)）")
         }
 
+        let rgbWeights = brightWeights(info, colors: [0, 1, 2])
         let skyStacker = StreamingStacker(mode: input.mode, count: sampleCount, clipping: input.averageClipping,
-                                          grouping: .rgbPixels(width: width, height: height,
-                                                                weights: brightWeights(info, colors: [0, 1, 2])))
+                                          grouping: .rgbPixels(width: width, height: height, weights: rgbWeights),
+                                          brightOptions: brightOptions(weights: rgbWeights,
+                                                                       blacks: [Float](repeating: Float(base.blackLevel), count: 3)))
         let groundMode: Mode = input.mode == .median ? .median : .average
         let groundStacker = input.skyGroundMask != nil ? StreamingStacker(mode: groundMode, count: sampleCount) : nil
 
@@ -596,6 +599,13 @@ enum RawStackPipeline {
             guard index < info.cameraMultipliers.count, info.cameraMultipliers[index] > 0 else { return 1 }
             return Float(1.0 / info.cameraMultipliers[index])
         }
+    }
+
+    /// 比較明合成（BrightStacker）の設定。明るさを対数にして比べる前に、重み付きの黒レベルを引く
+    private static func brightOptions(weights: [Float], blacks: [Float]) -> BrightStacker.Options {
+        var options = BrightStacker.Options()
+        options.scoreOffset = zip(weights, blacks).map { $0 * $1 }.reduce(0, +)
+        return options
     }
 
     // MARK: - キャリブレーション
