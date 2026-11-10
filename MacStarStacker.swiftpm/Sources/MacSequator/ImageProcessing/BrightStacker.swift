@@ -8,9 +8,11 @@ import Foundation
 /// 一方で値ごとに最大値を取ると、雲と青空の色が混ざって雲の範囲が紫になり、暗い所はノイズの底上げでマゼンタに転ぶ。
 ///
 /// そこで次の2つを合わせる。
-/// 1. 背景: ブロックの明るさ（ホワイトバランス係数の逆数で重み付けした合計）をまわりで平均してから比べ、
-///    一番明るいフレームとの差がノイズ程度のフレームは重み exp((明るさ - 最大) / T) で混ぜる。
+/// 1. 背景: ブロックの明るさ（ホワイトバランス係数の逆数で重み付けした合計から黒を引いたもの）をまわりで平均し、
+///    対数にしてから比べる。一番明るいフレームとの比が blendRange 程度までのフレームも、重み (明るさ / 最大)^(1 / blendRange) で混ぜる。
 ///    ブロックの値はすべて同じ重みで混ぜるので色の組み合わせは崩れず、明るさの近いフレームはまだらにならずなめらかに混ざる。
+///    1枚を選ぶと、街明かりに照らされた雲（灰色）と夜明けの空（青）のように、明るさが同じになる所で色が急に切り替わって
+///    境目がくっきり出るため、広めに混ぜて境目をなめらかにする。
 /// 2. 細部: フレームごとに、まわりより細く明るい部分（白トップハット）のうち1枚のノイズより十分明るい所を取り出し、
 ///    その値ごとの最大値を 1 に重ねる。光跡は値ごとにつながり、雲と空の色の差のように広がった差は重ねない。
 ///    フレームごとにそのフレームの背景からの明るさで比べるため、雲の上を通った星も星の色のまま重なる。
@@ -20,8 +22,15 @@ final class BrightStacker {
         var smoothingRadius = 4
         /// 細部として重ねる差の太さの半分の上限（画素）。これより広い差は背景として扱う
         var detailRadius = 8
-        /// 混ぜる幅 T（平均した明るさのフレームごとのばらつきの倍数）
+        /// 混ぜる幅の下限（平均した明るさのフレームごとのばらつきの倍数）
         var temperatureScale: Float = 1
+        /// 明るさの比で混ぜる幅（自然対数）。0 より大きいと、明るさを対数にして比べ、
+        /// 一番明るいフレームとの比が exp(blendRange) 程度までのフレームも混ぜる（明るさの近い所の境目をなめらかにする）。
+        /// 実データ（雲と夜明けの空）で 0.1・0.2・0.5 を見比べ、境目がいちばん目立たない 0.5 にした。
+        /// 0 なら明るさをそのまま比べ、ノイズ程度の差のフレームだけを混ぜる
+        var blendRange: Float = 0.5
+        /// 明るさから引く黒の分（重み付きの黒レベル）。対数にする前に引く
+        var scoreOffset: Float = 0
         /// 細部を重ね始める差・すべて重ねる差（1枚あたりのノイズの標準偏差の倍数）
         var detailLower: Float = 4
         var detailUpper: Float = 7
@@ -124,7 +133,7 @@ final class BrightStacker {
         if added == 2, let first = firstFrame {
             let model = FrameNoiseModel(first: first, second: frame, grid: grid)
             noise = model
-            temperature = Self.scoreSpread(bestScore, scores) * options.temperatureScale
+            temperature = max(Self.scoreSpread(bestScore, scores) * options.temperatureScale, options.blendRange)
             addDetail(first, noise: model)
             firstFrame = nil
         }
@@ -256,7 +265,12 @@ final class BrightStacker {
                 }
             }
         }
-        return Self.boxMean(scores, g.unitsWide, g.unitsHigh, g.unitRadius(options.smoothingRadius))
+        var smoothed = Self.boxMean(scores, g.unitsWide, g.unitsHigh, g.unitRadius(options.smoothingRadius))
+        if options.blendRange > 0 {
+            let offset = options.scoreOffset
+            for u in 0..<smoothed.count { smoothed[u] = log(max(1, smoothed[u] - offset)) }
+        }
+        return smoothed
     }
 
     private func accumulate(_ frame: [UInt16], scores: [Float]) {
