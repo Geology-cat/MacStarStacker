@@ -90,6 +90,12 @@ bash MacStarStacker.swiftpm/build_app.sh
   ```
   地上固定フレームを試すときは `NIGHTSCAPE_GROUND_FIXED=<地上固定フレームのパス（カンマ区切り）>` を足す
   （名前に「地上固定」を含むファイルは、指定しないときも Light に含めない）。
+- 比較明合成（RAW経路、`BrightStacker`）を実データで確かめるときも、環境変数を指定して確認用テストを動かす
+  （合成結果 `compare_bright.dng`・`compare_bright.tiff` と合成時間が出る。`COMPARE_BRIGHT_ALIGN=1` で位置合わせあり）。
+  ```bash
+  COMPARE_BRIGHT_SAMPLE_DIR=<RAWのフォルダ> COMPARE_BRIGHT_OUTPUT_DIR=<書き出し先> \
+    swift test -c release --package-path MacStarStacker.swiftpm --filter CompareBrightSampleTests
+  ```
 - `swift test` はビルドしているMacのアーキテクチャだけで動く。開発用のMacはIntelなので、arm64 版は実行して確認できない。
 - 10.12 / 10.13 での実際の動作は、その仮想マシンか実機で確認する必要がある（CIでは実行できない）。
 
