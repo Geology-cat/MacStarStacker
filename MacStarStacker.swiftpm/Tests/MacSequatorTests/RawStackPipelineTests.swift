@@ -165,78 +165,191 @@ final class RawStackPipelineTests: XCTestCase {
     // MARK: - ベイヤー配列のまま合成
 
     /// テスト用カメラ（AsShotNeutral 0.5, 1, 0.6）での比較明合成の重み。RGGBの各位置のWB係数の逆数。
-    private var brightWeights: [Double] { [0.5, 1, 1, 0.6] }
+    private let brightWeights: [Float] = [0.5, 1, 1, 0.6]
 
-    /// 2x2ブロックごとに、WB係数の逆数で重み付けした合計が最大のフレームのブロックを採用した結果
-    private func blockCompareBright(_ frames: [[UInt16]], width: Int = 64, height: Int = 48) -> [UInt16] {
-        var output = frames[0]
-        var best = [Double](repeating: -1, count: (width / 2) * (height / 2))
-        for frame in frames {
-            for by in 0..<(height / 2) {
-                for bx in 0..<(width / 2) {
-                    let i = [by * 2 * width + bx * 2, by * 2 * width + bx * 2 + 1, (by * 2 + 1) * width + bx * 2, (by * 2 + 1) * width + bx * 2 + 1]
-                    var score = 0.0
-                    for k in 0..<4 { score += brightWeights[k] * Double(frame[i[k]]) }
-                    if score > best[by * (width / 2) + bx] {
-                        best[by * (width / 2) + bx] = score
-                        for k in 0..<4 { output[i[k]] = frame[i[k]] }
-                    }
-                }
-            }
-        }
-        return output
-    }
-
-    func testCompareBrightSelectsWholeBayerBlocksWeightedByWhiteBalance() throws {
-        let (a, pa) = try makeBayerDNG("a.dng") { x, y, _ in UInt16(800 + (x * 31 + y * 17) % 900) }
-        let (b, pb) = try makeBayerDNG("b.dng") { x, y, _ in UInt16(800 + (x * 13 + y * 29) % 900) }
-        let result = try XCTUnwrap(RawStackPipeline.stack(input(lights: [a, b], mode: .compareBright)) { _, _ in })
-        XCTAssertEqual(result.kind, .bayer)
-        XCTAssertEqual(result.pixels, blockCompareBright([pa, pb]))
-        // 2x2ブロックの4画素は必ず同じフレームから来る（色の組み合わせが崩れない）
-        for by in 0..<24 {
-            for bx in 0..<32 {
-                let i = [by * 128 + bx * 2, by * 128 + bx * 2 + 1, by * 128 + 64 + bx * 2, by * 128 + 65 + bx * 2]
-                let fromA = i.allSatisfy { result.pixels[$0] == pa[$0] }
-                let fromB = i.allSatisfy { result.pixels[$0] == pb[$0] }
-                XCTAssertTrue(fromA || fromB, "ブロック(\(bx),\(by))が2枚のフレームの混ざりになっている")
-            }
-        }
-    }
-
-    func testCompareBrightNoiseFloorStaysNeutralAfterWhiteBalance() throws {
-        // 真っ暗な空（黒レベル+ノイズのみ、センサー値でのノイズはR・G・B同じ）を30枚比較明合成する
-        var seed: UInt64 = 12345
-        func gaussian() -> Double {
+    /// 再現できる正規乱数
+    private struct Gaussian {
+        var seed: UInt64
+        mutating func next() -> Double {
             seed = seed &* 6364136223846793005 &+ 1442695040888963407
             let u1 = max(1e-12, Double(seed >> 11) / Double(1 << 53))
             seed = seed &* 6364136223846793005 &+ 1442695040888963407
             let u2 = Double(seed >> 11) / Double(1 << 53)
             return (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
         }
+    }
+
+    /// ベイヤー配列（RGGB）の2x2の位置ごとの値と、正規分布のノイズで作ったフレーム
+    private func noisyBayer(width: Int, height: Int, values: [Double], sigma: Double, random: inout Gaussian) -> [UInt16] {
+        var pixels = [UInt16](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                pixels[y * width + x] = UInt16(max(0, values[(y & 1) << 1 | (x & 1)] + sigma * random.next()))
+            }
+        }
+        return pixels
+    }
+
+    private func brightStacker(width: Int, height: Int, options: BrightStacker.Options = BrightStacker.Options()) -> StreamingStacker {
+        StreamingStacker(mode: .compareBright, count: width * height,
+                         grouping: .bayerBlocks(width: width, height: height, weights: brightWeights), brightOptions: options)
+    }
+
+    func testCompareBrightUsesBayerBlockStacker() throws {
+        let (a, pa) = try makeBayerDNG("a.dng") { x, y, _ in UInt16(800 + (x * 31 + y * 17) % 900) }
+        let (b, pb) = try makeBayerDNG("b.dng") { x, y, _ in UInt16(800 + (x * 13 + y * 29) % 900) }
+        let result = try XCTUnwrap(RawStackPipeline.stack(input(lights: [a, b], mode: .compareBright)) { _, _ in })
+        XCTAssertEqual(result.kind, .bayer)
+        let expected = brightStacker(width: 64, height: 48)
+        expected.add(pa)
+        expected.add(pb)
+        XCTAssertEqual(result.pixels, expected.result())
+    }
+
+    func testCompareBrightBlendsWholeBayerBlocksWithTheSameWeight() {
+        // 明るさの近いフレームは混ぜるが、2x2ブロックの4画素は同じ重みで混ぜる（色の組み合わせが崩れない）
+        let width = 128, height = 96
+        var random = Gaussian(seed: 7)
+        let a = noisyBayer(width: width, height: height, values: [1500, 1500, 1500, 1500], sigma: 40, random: &random)
+        let b = noisyBayer(width: width, height: height, values: [1500, 1500, 1500, 1500], sigma: 40, random: &random)
+        var options = BrightStacker.Options()
+        options.detailLower = 1e9  // 細部を重ねない（混ぜ方だけを見る）
+        options.detailUpper = 2e9
+        let stacker = brightStacker(width: width, height: height, options: options)
+        stacker.add(a)
+        stacker.add(b)
+        let result = stacker.result()
+        var checked = 0, blended = 0
+        for by in 0..<(height / 2) {
+            for bx in 0..<(width / 2) {
+                let indices = [by * 2 * width + bx * 2, by * 2 * width + bx * 2 + 1,
+                               (by * 2 + 1) * width + bx * 2, (by * 2 + 1) * width + bx * 2 + 1]
+                // 4画素とも2枚の差が十分ある所で、(結果 - B) / (A - B) が揃っていること
+                guard indices.allSatisfy({ abs(Int(a[$0]) - Int(b[$0])) >= 40 }) else { continue }
+                let ratios = indices.map { (Double(result[$0]) - Double(b[$0])) / (Double(a[$0]) - Double(b[$0])) }
+                checked += 1
+                XCTAssertLessThan(ratios.max()! - ratios.min()!, 0.05, "ブロック(\(bx),\(by))の4画素が別の重みで混ざっている")
+                if ratios[0] > 0.05 && ratios[0] < 0.95 { blended += 1 }
+            }
+        }
+        XCTAssertGreaterThan(checked, 50)
+        XCTAssertGreaterThan(blended, checked / 4, "ノイズの差しかない2枚は混ざる")
+    }
+
+    func testCompareBrightDoesNotMottleCloudAndSkyOfSimilarBrightness() {
+        // 青空（Bが明るい）と雲（Rが明るい）の明るさが近いフレームを交互に重ねる。
+        // ブロックごとに1枚を選ぶとノイズ次第で入れ替わってまだらになり、値ごとに最大値を取ると色が混ざって紫になる
+        let width = 128, height = 96
+        var random = Gaussian(seed: 11)
+        let sky: [Double] = [600, 1000, 1000, 1500]    // 重み付きの明るさ 3200
+        let cloud: [Double] = [1100, 1000, 1000, 1000] // 重み付きの明るさ 3150
+        let stacker = brightStacker(width: width, height: height)
+        for index in 0..<12 {
+            stacker.add(noisyBayer(width: width, height: height, values: index % 2 == 0 ? sky : cloud, sigma: 20, random: &random))
+        }
+        let result = stacker.result()
+        var reds: [Double] = []
+        for y in stride(from: 0, to: height, by: 2) {
+            for x in stride(from: 0, to: width, by: 2) { reds.append(Double(result[y * width + x])) }
+        }
+        let mean = reds.reduce(0, +) / Double(reds.count)
+        let deviation = (reds.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(reds.count)).squareRoot()
+        XCTAssertLessThan(deviation, 30, "雲と空がブロックごとに入れ替わらない（まだらにならない）")
+        XCTAssertLessThan(mean, 800, "雲のRと空のBを混ぜた色（紫）にならない")
+    }
+
+    func testCompareBrightKeepsStarTrailContinuousAcrossFrameJoints() {
+        // ベイヤー配列の上を横に動く星（像の広がり 0.6px）。フレームの継ぎ目が2x2ブロックの途中に来るようにする。
+        // ブロックごとに1枚を選ぶと、継ぎ目のブロックで片方の値が欠けて光跡が途切れ、色の区切りになる
+        let width = 128, height = 96, row = 48
+        let amplitude = 8000.0, spread = 0.6, background = 1000.0
+        var random = Gaussian(seed: 5)
+        let stacker = brightStacker(width: width, height: height)
+        for frame in 0..<20 {
+            let start = 20.5 + Double(frame) * 4  // 継ぎ目は 24.5, 28.5, ...（ブロックの2画素の間）
+            var pixels = [UInt16](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let along = max(0, start - Double(x), Double(x) - (start + 4))
+                    let across = Double(y - row)
+                    let star = amplitude * exp(-(along * along + across * across) / (2 * spread * spread))
+                    pixels[y * width + x] = UInt16(background + star + 20 * random.next())
+                }
+            }
+            stacker.add(pixels)
+        }
+        let result = stacker.result()
+        for x in 24..<96 {
+            // 光跡の中心の行（R・G）はどの値も星の明るさ、隣の行（G・B）もそろって星の裾の明るさ
+            XCTAssertGreaterThan(Double(result[row * width + x]) - background, 0.9 * amplitude, "x=\(x) で光跡が途切れている")
+            let wing = amplitude * exp(-1 / (2 * spread * spread))
+            XCTAssertEqual(Double(result[(row + 1) * width + x]) - background, wing, accuracy: 0.2 * wing, "x=\(x) で光跡の裾が途切れている")
+        }
+        // 光跡から離れた空は、ノイズの分の底上げだけ
+        XCTAssertEqual(Double(result[10 * width + 60]), background, accuracy: 120)
+    }
+
+    func testBrightStackerFiltersMatchBruteForce() {
+        // 平均・最小・最大フィルタ（累積・区切りごとの累積で計算）が、範囲内を素直に調べた値と一致すること（端も含む）
+        var random = Gaussian(seed: 3)
+        for (width, height, radius) in [(37, 23, 1), (37, 23, 4), (300, 7, 5), (5, 40, 3), (9, 9, 6)] {
+            let values = (0..<(width * height)).map { _ in Float(random.next()) }
+            let mean = BrightStacker.boxMean(values, width, height, radius)
+            let lowest = BrightStacker.filter(values, width, height, radius, minimum: true)
+            let highest = BrightStacker.filter(values, width, height, radius, minimum: false)
+            for y in 0..<height {
+                for x in 0..<width {
+                    var sum: Float = 0, cells: Float = 0, low = Float.infinity, high = -Float.infinity
+                    for yy in max(0, y - radius)...min(height - 1, y + radius) {
+                        for xx in max(0, x - radius)...min(width - 1, x + radius) {
+                            let v = values[yy * width + xx]
+                            sum += v; cells += 1; low = min(low, v); high = max(high, v)
+                        }
+                    }
+                    let i = y * width + x
+                    XCTAssertEqual(mean[i], sum / cells, accuracy: 1e-4, "平均 \(width)x\(height) r=\(radius) (\(x),\(y))")
+                    XCTAssertEqual(lowest[i], low, "最小 \(width)x\(height) r=\(radius) (\(x),\(y))")
+                    XCTAssertEqual(highest[i], high, "最大 \(width)x\(height) r=\(radius) (\(x),\(y))")
+                }
+            }
+        }
+    }
+
+    func testCompareBrightNoiseFloorStaysNeutralAfterWhiteBalance() throws {
+        // 真っ暗な空（黒レベル+ノイズのみ、センサー値でのノイズはR・G・B同じ）を30枚比較明合成する。
+        // ノイズを見積もって混ぜる・細部を重ねる処理が働くよう、128x96 の画像にする
+        let width = 128, height = 96
+        var random = Gaussian(seed: 12345)
         let lights = try (0..<30).map { index -> URL in
-            try makeBayerDNG("noise_\(index).dng") { _, _, _ in UInt16(Double(black) + 1000 + 40 * gaussian()) }.0
+            try makeBayerDNG("noise_\(index).dng", width: width, height: height) { _, _, _ in
+                UInt16(Double(black) + 1000 + 40 * random.next())
+            }.0
         }
         let result = try XCTUnwrap(RawStackPipeline.stack(input(lights: lights, mode: .compareBright)) { _, _ in })
 
         // WB後（R×2、B×1/0.6）の「本来の値1000からの底上げ量」が色ごとに揃っていること
         let multipliers = [2.0, 1.0, 1.0, 1 / 0.6]
         var lift = [Double](repeating: 0, count: 4), counts = [Double](repeating: 0, count: 4)
-        for y in 0..<48 {
-            for x in 0..<64 {
+        for y in 0..<height {
+            for x in 0..<width {
                 let position = (y & 1) << 1 | (x & 1)
-                lift[position] += (Double(result.pixels[y * 64 + x]) - Double(black) - 1000) * multipliers[position]
+                lift[position] += (Double(result.pixels[y * width + x]) - Double(black) - 1000) * multipliers[position]
                 counts[position] += 1
             }
         }
         let red = lift[0] / counts[0], green = (lift[1] + lift[2]) / (counts[1] + counts[2]), blue = lift[3] / counts[3]
-        XCTAssertGreaterThan(green, 10, "比較明合成はノイズの分だけ明るくなる")
+        // 明るさの近いフレームを混ぜるため、1枚を選ぶよりノイズによる底上げは小さい（それでも明るくはなる）
+        XCTAssertGreaterThan(green, 2, "比較明合成はノイズの分だけ明るくなる")
         XCTAssertEqual(red / green, 1, accuracy: 0.2, "赤だけ持ち上がるとマゼンタに転ぶ")
         XCTAssertEqual(blue / green, 1, accuracy: 0.2, "青だけ持ち上がるとマゼンタに転ぶ")
     }
 
     func testCompareBrightKeepsBrightestRGBPixelWeightedByWhiteBalance() {
-        let stacker = StreamingStacker(mode: .compareBright, count: 6, grouping: .rgbPixels(weights: [0.5, 1, 0.6]))
+        // 明るさを比べる前にまわりで平均しない（2画素だけの画像で、画素ごとの選び方を見る）
+        var options = BrightStacker.Options()
+        options.smoothingRadius = 0
+        let stacker = StreamingStacker(mode: .compareBright, count: 6, grouping: .rgbPixels(width: 2, height: 1, weights: [0.5, 1, 0.6]),
+                                       brightOptions: options)
         stacker.add([1000, 100, 1000, /**/ 10, 10, 10])
         stacker.add([100, 900, 100, /**/ 20, 5, 20])
         // 1画素目: 0.5*1000+100+0.6*1000=1200 > 0.5*100+900+0.6*100=1010 → 1枚目を丸ごと
@@ -537,7 +650,10 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(raw.kind, .bayer)
         XCTAssertNotNil(state.stackedResult)
         XCTAssertTrue(state.stackingStatus.contains("ベイヤー配列"), state.stackingStatus)
-        XCTAssertEqual(raw.pixels, blockCompareBright([pa, pb]))
+        let expected = brightStacker(width: 64, height: 48)
+        expected.add(pa)
+        expected.add(pb)
+        XCTAssertEqual(raw.pixels, expected.result())
 
         let url = directory.appendingPathComponent("export.dng")
         try ImageExporter.write(image: try XCTUnwrap(state.stackedResult), format: .dng,

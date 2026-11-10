@@ -303,7 +303,8 @@ enum RawStackPipeline {
         }
 
         let skyStacker = StreamingStacker(mode: input.mode, count: sampleCount, clipping: input.averageClipping,
-                                          grouping: .rgbPixels(weights: brightWeights(info, colors: [0, 1, 2])))
+                                          grouping: .rgbPixels(width: width, height: height,
+                                                                weights: brightWeights(info, colors: [0, 1, 2])))
         let groundMode: Mode = input.mode == .median ? .median : .average
         let groundStacker = input.skyGroundMask != nil ? StreamingStacker(mode: groundMode, count: sampleCount) : nil
 
@@ -588,7 +589,7 @@ enum RawStackPipeline {
     /// 比較明合成で明るさを比べるときの色ごとの重み（撮影時ホワイトバランス係数の逆数）。
     /// センサー値のまま色ごとに最大値を取ると、ノイズの最大値による底上げがR・G・Bで同じ量になり、
     /// 現像時にホワイトバランスでR・Bだけ増幅されて暗部がマゼンタに転ぶ。
-    /// 逆数で重み付けした明るさでフレームを選ぶと、底上げ量がホワイトバランス後に揃い無彩色になる。
+    /// 逆数で重み付けした明るさでフレームを比べる（BrightStacker）と、底上げ量がホワイトバランス後に揃い無彩色になる。
     private static func brightWeights(_ info: RawSensorInfo, colors: [UInt8]) -> [Float] {
         colors.map { color in
             let index = Int(color)
@@ -940,31 +941,40 @@ final class StreamingStacker {
     enum BrightGrouping {
         /// 値ごとに最大値を取る
         case samples
-        /// ベイヤー配列の2x2ブロック（R・G・G・B）ごとに、重み付きの合計が最大のフレームのブロックをそのまま使う。
+        /// ベイヤー配列の2x2ブロック（R・G・G・B）を単位にする（BrightStacker）。
         /// weights は2x2の (0,0) (0,1) (1,0) (1,1) の位置の重み。
         case bayerBlocks(width: Int, height: Int, weights: [Float])
-        /// RGBを並べた画素ごとに、重み付きの合計が最大のフレームの画素をそのまま使う
-        case rgbPixels(weights: [Float])
+        /// RGBを並べた画素を単位にする（BrightStacker）
+        case rgbPixels(width: Int, height: Int, weights: [Float])
     }
 
     private let mode: RawStackPipeline.Mode
     private let count: Int
-    private let grouping: BrightGrouping
     /// 平均でシグマクリッピングする（全フレームを保持する）
     private let clipping: SigmaClipping?
-    /// ブロック・画素ごとの採用中フレームの明るさ
-    private var bestScore: [Float] = []
+    /// 比較明合成をブロック・画素を単位にして行う
+    private let bright: BrightStacker?
     /// 16bit値を整数のまま積算する（Floatでは数百枚を超えると丸め誤差が出るため）
     private var sum: [UInt32] = []
     private var maximum: [UInt16] = []
     private var frames: [[UInt16]] = []
     private var added = 0
 
-    init(mode: RawStackPipeline.Mode, count: Int, clipping: SigmaClipping? = nil, grouping: BrightGrouping = .samples) {
+    init(mode: RawStackPipeline.Mode, count: Int, clipping: SigmaClipping? = nil, grouping: BrightGrouping = .samples,
+         brightOptions: BrightStacker.Options = BrightStacker.Options()) {
         self.mode = mode
         self.count = count
         self.clipping = mode == .average ? clipping : nil
-        self.grouping = grouping
+        switch (mode, grouping) {
+        case (.compareBright, .bayerBlocks(let width, let height, let weights)):
+            precondition(width * height == count && weights.count == 4, "ベイヤー配列の寸法が一致しません")
+            bright = BrightStacker(layout: .bayer(width: width, height: height), weights: weights, options: brightOptions)
+        case (.compareBright, .rgbPixels(let width, let height, let weights)):
+            precondition(width * height * 3 == count && weights.count == 3, "RGBの画素数が一致しません")
+            bright = BrightStacker(layout: .rgb(width: width, height: height), weights: weights, options: brightOptions)
+        default:
+            bright = nil
+        }
     }
 
     func add(_ frame: [UInt16]) {
@@ -987,10 +997,8 @@ final class StreamingStacker {
                 }
             }
         case .compareBright:
-            if case .bayerBlocks(let width, let height, let weights) = grouping {
-                addBrightBayerBlocks(frame, width: width, height: height, weights: weights)
-            } else if case .rgbPixels(let weights) = grouping {
-                addBrightRGBPixels(frame, weights: weights)
+            if let bright {
+                bright.add(frame)
             } else if maximum.isEmpty {
                 maximum = frame
             } else {
@@ -1020,84 +1028,9 @@ final class StreamingStacker {
             let divisor = UInt64(added)
             return sum.map { UInt16(min(65535, (UInt64($0) + divisor / 2) / divisor)) }
         case .compareBright:
-            return maximum
+            return bright?.result() ?? maximum
         case .median:
             return median()
-        }
-    }
-
-    private func addBrightBayerBlocks(_ frame: [UInt16], width: Int, height: Int, weights: [Float]) {
-        precondition(width * height == count && weights.count == 4, "ベイヤー配列の寸法が一致しません")
-        let blocksWide = width / 2, blocksHigh = height / 2
-        let first = maximum.isEmpty
-        if first {
-            maximum = frame
-            bestScore = [Float](repeating: -.greatestFiniteMagnitude, count: max(1, blocksWide * blocksHigh))
-        }
-        let w0 = weights[0], w1 = weights[1], w2 = weights[2], w3 = weights[3]
-        maximum.withUnsafeMutableBufferPointer { output in
-            bestScore.withUnsafeMutableBufferPointer { scores in
-                frame.withUnsafeBufferPointer { input in
-                    DispatchQueue.concurrentPerform(iterations: blocksHigh) { by in
-                        let top = by * 2 * width, bottom = top + width
-                        for bx in 0..<blocksWide {
-                            let x = bx * 2
-                            let score = w0 * Float(input[top + x]) + w1 * Float(input[top + x + 1])
-                                + w2 * Float(input[bottom + x]) + w3 * Float(input[bottom + x + 1])
-                            let blockIndex = by * blocksWide + bx
-                            if first || score > scores[blockIndex] {
-                                scores[blockIndex] = score
-                                if !first {
-                                    output[top + x] = input[top + x]
-                                    output[top + x + 1] = input[top + x + 1]
-                                    output[bottom + x] = input[bottom + x]
-                                    output[bottom + x + 1] = input[bottom + x + 1]
-                                }
-                            }
-                        }
-                    }
-                    // 奇数幅・奇数高さの端の列・行は2x2に収まらないため値ごとの最大値にする
-                    guard !first else { return }
-                    for y in 0..<height {
-                        for x in 0..<width where (x >= blocksWide * 2 || y >= blocksHigh * 2) && input[y * width + x] > output[y * width + x] {
-                            output[y * width + x] = input[y * width + x]
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func addBrightRGBPixels(_ frame: [UInt16], weights: [Float]) {
-        precondition(count % 3 == 0 && weights.count == 3, "RGBの画素数が一致しません")
-        let pixelCount = count / 3
-        let first = maximum.isEmpty
-        if first {
-            maximum = frame
-            bestScore = [Float](repeating: -.greatestFiniteMagnitude, count: pixelCount)
-        }
-        let wr = weights[0], wg = weights[1], wb = weights[2]
-        let chunk = max(1, pixelCount / 64)
-        maximum.withUnsafeMutableBufferPointer { output in
-            bestScore.withUnsafeMutableBufferPointer { scores in
-                frame.withUnsafeBufferPointer { input in
-                    DispatchQueue.concurrentPerform(iterations: (pixelCount + chunk - 1) / chunk) { part in
-                        let end = min(pixelCount, (part + 1) * chunk)
-                        for p in (part * chunk)..<end {
-                            let i = p * 3
-                            let score = wr * Float(input[i]) + wg * Float(input[i + 1]) + wb * Float(input[i + 2])
-                            if first || score > scores[p] {
-                                scores[p] = score
-                                if !first {
-                                    output[i] = input[i]
-                                    output[i + 1] = input[i + 1]
-                                    output[i + 2] = input[i + 2]
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
