@@ -8,15 +8,12 @@ DIST_DIR="$PROJ_DIR/../dist"
 # Package.swift の deploymentTarget と合わせる
 DEPLOYMENT_TARGET="14.0"
 ARCHS=(arm64 x86_64)
-BUILD_DIR="$PROJ_DIR/.build/apple/Products/Release"
 APP_NAME="MacStarStacker"          # display name of the .app
 BIN_NAME="MacSequator"             # SPM executable product name
 APP_DIR="$DIST_DIR/${APP_NAME}.app"
 DMG_PATH="$DIST_DIR/${APP_NAME}.dmg"
 DMG_STAGING="$PROJ_DIR/.build/dmg_staging"
 CONTENTS="$APP_DIR/Contents"
-BIN_SRC="$BUILD_DIR/$BIN_NAME"
-BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
 INFO_PLIST="$PROJ_DIR/Sources/MacSequator/Info.plist"
 ICNS_SRC="$PROJ_DIR/Sources/MacSequator/AppIcon.icns"
 
@@ -30,6 +27,10 @@ for ARCH in "${ARCHS[@]}"; do
     ARCH_ARGS+=(--arch "$ARCH")
 done
 swift build -c release "${ARCH_ARGS[@]}"
+# 出力先は Xcode によって違う（16.x は .build/apple/Products/Release、27 は .build/out/Products/Release）ので SwiftPM に聞く
+BUILD_DIR="$(swift build -c release "${ARCH_ARGS[@]}" --show-bin-path)"
+BIN_SRC="$BUILD_DIR/$BIN_NAME"
+BUNDLE_SRC="$BUILD_DIR/${BIN_NAME}_MacSequator.bundle"
 
 echo "=== Assembling .app bundle in dist/ ==="
 mkdir -p "$DIST_DIR"
