@@ -314,7 +314,11 @@ final class RawStackPipelineTests: XCTestCase {
         let width = 128, height = 96, row = 48
         let amplitude = 8000.0, spread = 0.6, background = 1000.0
         var random = Gaussian(seed: 5)
-        let stacker = brightStacker(width: width, height: height)
+        // 値ごとのつながりを見るため、偽色を抑える処理（光跡を少し広げる）は止める
+        var options = BrightStacker.Options()
+        options.scoreOffset = brightWeights.map { $0 * Float(black) }.reduce(0, +)
+        options.trailColor.enabled = false
+        let stacker = brightStacker(width: width, height: height, options: options)
         for frame in 0..<20 {
             let start = 20.5 + Double(frame) * 4  // 継ぎ目は 24.5, 28.5, ...（ブロックの2画素の間）
             var pixels = [UInt16](repeating: 0, count: width * height)
@@ -337,6 +341,83 @@ final class RawStackPipelineTests: XCTestCase {
         }
         // 光跡から離れた空は、ノイズの分の底上げだけ
         XCTAssertEqual(Double(result[10 * width + 60]), background, accuracy: 120)
+    }
+
+    /// 白い星（ホワイトバランス後に R・G・B が同じ）の細い光跡が、ベイヤー配列の行をゆっくり斜めに横切る合成。
+    /// 戻り値は、光跡に沿って4画素ごとに、光跡の断面全体で積分した R/G・B/G（ホワイトバランス後、色ごとの画素の密度で割った比）
+    private func falseColorAlongTrail(correct: Bool) -> (red: [Double], blue: [Double], total: Double) {
+        let width = 160, height = 96
+        let amplitude = 6000.0, spread = 0.45, background = 1000.0
+        var random = Gaussian(seed: 23)
+        var options = BrightStacker.Options()
+        options.scoreOffset = brightWeights.map { $0 * Float(black) }.reduce(0, +)
+        options.trailColor.enabled = correct
+        let stacker = brightStacker(width: width, height: height, options: options)
+        // 光跡の中心の行: x=8 で 40、x=152 で 50（行に対して約4°傾く。乗る色の行がゆっくり入れ替わる）
+        func center(_ x: Double) -> Double { 40 + (x - 8) * 10 / 144 }
+        for frame in 0..<24 {
+            let start = 8.0 + Double(frame) * 6
+            var pixels = [UInt16](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let position = (y & 1) << 1 | (x & 1)
+                    let along = max(0, start - Double(x), Double(x) - (start + 6))
+                    let across = Double(y) - center(Double(x))
+                    // ホワイトバランス後に白くなるよう、センサーの値は重み（係数の逆数）を掛けた値にする
+                    let star = amplitude * Double(brightWeights[position]) * exp(-(along * along + across * across) / (2 * spread * spread))
+                    pixels[y * width + x] = UInt16(max(0, background + star + 20 * random.next()))
+                }
+            }
+            stacker.add(pixels)
+        }
+        let result = stacker.result()
+        var reds: [Double] = [], blues: [Double] = [], total = 0.0
+        for x0 in stride(from: 24, to: 136, by: 4) {
+            // 4列 x 12行（偶数行と奇数行が同じ数）なら、R・B は1/4、G は1/2 の画素にある
+            var sums = [0.0, 0.0, 0.0]
+            let row = Int(center(Double(x0) + 2).rounded())
+            for y in (row - 6)...(row + 5) {
+                for x in x0..<(x0 + 4) {
+                    let position = (y & 1) << 1 | (x & 1)
+                    let color = [0, 1, 1, 2][position]
+                    let value = (Double(result[y * width + x]) - background) / Double(brightWeights[position])
+                    sums[color] += value
+                    total += value
+                }
+            }
+            reds.append(2 * sums[0] / sums[1])
+            blues.append(2 * sums[2] / sums[1])
+        }
+        return (reds, blues, total)
+    }
+
+    func testCompareBrightEvensOutFalseColorAlongStarTrail() {
+        // 星の像が画素より小さいと、光跡が R の行に乗る所は赤、B の行に乗る所は青になる（偽色）。
+        // 光跡に沿って色を平均し直し、明るさを R・G・B の画素に行き渡らせると、光跡は本来の白にそろう
+        let before = falseColorAlongTrail(correct: false)
+        let after = falseColorAlongTrail(correct: true)
+        func spread(_ values: [Double]) -> Double { values.map { abs($0 - 1) }.max()! }
+        XCTAssertGreaterThan(spread(before.red), 0.5, "直す前は光跡に沿って R/G が大きく変わる（試験の前提）")
+        XCTAssertGreaterThan(spread(before.blue), 0.5, "直す前は光跡に沿って B/G が大きく変わる（試験の前提）")
+        XCTAssertLessThan(spread(after.red), 0.08, "直したあとは光跡の色が白にそろう（R/G）")
+        XCTAssertLessThan(spread(after.blue), 0.08, "直したあとは光跡の色が白にそろう（B/G）")
+        // 光跡の明るさの合計は変わらない（広げるだけ）
+        XCTAssertEqual(after.total, before.total, accuracy: 0.1 * before.total)
+    }
+
+    func testTrailColorCorrectorLeavesIsolatedPointsAndEmptyDetailAlone() {
+        // 動かない点（線ではない）と、細部の無い所はそのまま
+        let grid = BrightStacker.Grid(.bayer(width: 64, height: 64))
+        var detail = [Float](repeating: 0, count: grid.sampleCount)
+        detail[32 * 64 + 32] = 5000  // R の画素だけに乗った点
+        let original = detail
+        TrailColorCorrector.correct(&detail, grid: grid, colors: [0, 1, 1, 2], whiteBalance: [2, 1, 1, 1.6],
+                                    threshold: 10, options: TrailColorCorrector.Options())
+        XCTAssertEqual(detail, original)
+        var empty = [Float](repeating: 0, count: grid.sampleCount)
+        TrailColorCorrector.correct(&empty, grid: grid, colors: [0, 1, 1, 2], whiteBalance: [2, 1, 1, 1.6],
+                                    threshold: 10, options: TrailColorCorrector.Options())
+        XCTAssertTrue(empty.allSatisfy { $0 == 0 })
     }
 
     func testBrightStackerFiltersMatchBruteForce() {
@@ -476,7 +557,8 @@ final class RawStackPipelineTests: XCTestCase {
         let mask = NSImage(cgImage: maskCG, size: NSSize(width: width, height: height))
 
         let without = try XCTUnwrap(RawStackPipeline.stack(input(lights: [f0, f1, f2], mode: .compareBright)) { _, _ in })
-        XCTAssertEqual(without.pixels[24 * width + 10], 15000)
+        // 偽色を抑える処理で光跡が少し広がる分だけ下がる
+        XCTAssertEqual(Double(without.pixels[24 * width + 10]), 15000, accuracy: 500)
 
         let with = try XCTUnwrap(RawStackPipeline.stack(input(lights: [f0, f1, f2], mode: .compareBright, trails: [1: [mask]])) { _, _ in })
         XCTAssertEqual(Double(with.pixels[24 * width + 10]), 1000, accuracy: 20, "光跡が前後フレームの値で置き換わること")
