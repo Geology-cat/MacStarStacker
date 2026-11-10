@@ -405,6 +405,67 @@ final class RawStackPipelineTests: XCTestCase {
         XCTAssertEqual(after.total, before.total, accuracy: 0.1 * before.total)
     }
 
+    /// 色の付いた星（ホワイトバランス後の R:G:B = color）の細い光跡を、角度 angle（度）で斜めに動かして合成し、
+    /// 光跡全体の色ごとの和の比（2ΣR/ΣG, 2ΣB/ΣG。ホワイトバランス後）を返す
+    private func trailColorTotals(angle: Double, color: [Double], correct: Bool) -> (red: Double, blue: Double) {
+        let width = 192, height = 192
+        let amplitude = 5000.0, spread = 0.5, background = 1000.0
+        var random = Gaussian(seed: 31)
+        var options = BrightStacker.Options()
+        options.scoreOffset = brightWeights.map { $0 * Float(black) }.reduce(0, +)
+        options.trailColor.enabled = correct
+        let stacker = brightStacker(width: width, height: height, options: options)
+        let dx = cos(angle * .pi / 180), dy = sin(angle * .pi / 180)
+        let cx = 96.0, cy = 96.0, half = 70.0
+        let colorOf = [color[0], color[1], color[1], color[2]]
+        for frame in 0..<28 {
+            let t0 = -half + Double(frame) * 5
+            var pixels = [UInt16](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let position = (y & 1) << 1 | (x & 1)
+                    let px = Double(x) - cx, py = Double(y) - cy
+                    let along = px * dx + py * dy, across = -px * dy + py * dx
+                    let outside = max(0, t0 - along, along - (t0 + 5))
+                    let star = amplitude * colorOf[position] * Double(brightWeights[position])
+                        * exp(-(outside * outside + across * across) / (2 * spread * spread))
+                    pixels[y * width + x] = UInt16(max(0, background + star + 20 * random.next()))
+                }
+            }
+            stacker.add(pixels)
+        }
+        let result = stacker.result()
+        var sums = [0.0, 0.0, 0.0]
+        for y in 0..<height {
+            for x in 0..<width {
+                let px = Double(x) - cx, py = Double(y) - cy
+                guard abs(-px * dy + py * dx) < 8, abs(px * dx + py * dy) < half - 10 else { continue }
+                let position = (y & 1) << 1 | (x & 1)
+                sums[[0, 1, 1, 2][position]] += (Double(result[y * width + x]) - background) / Double(brightWeights[position])
+            }
+        }
+        return (2 * sums[0] / sums[1], 2 * sums[2] / sums[1])
+    }
+
+    func testTrailColorCorrectionKeepsTheStarColor() {
+        // 偽色を直しても、光跡全体の色（星の本来の色）は変わらない
+        for angle in [-52.0, 4.0, 80.0] {
+            for color in [[1.5, 1.0, 0.7], [0.7, 1.0, 1.4], [1.15, 1.0, 1.06]] {
+                let after = trailColorTotals(angle: angle, color: color, correct: true)
+                XCTAssertEqual(after.red, color[0], accuracy: 0.03 * color[0], "角度 \(angle)° 色 \(color) の R/G")
+                XCTAssertEqual(after.blue, color[2], accuracy: 0.03 * color[2], "角度 \(angle)° 色 \(color) の B/G")
+            }
+        }
+        // ちょうど45°で R・B の対角線だけを通る光跡は、G の画素にほとんど光が乗らず、撮影データの時点で色が偏る。
+        // 直す処理はその偏りを大きくしない
+        for color in [[1.5, 1.0, 0.7], [0.7, 1.0, 1.4]] {
+            let before = trailColorTotals(angle: 45, color: color, correct: false)
+            let after = trailColorTotals(angle: 45, color: color, correct: true)
+            XCTAssertEqual(after.red, before.red, accuracy: 0.05 * before.red, "45° 色 \(color) の R/G")
+            XCTAssertEqual(after.blue, before.blue, accuracy: 0.05 * before.blue, "45° 色 \(color) の B/G")
+        }
+    }
+
     func testTrailColorCorrectorLeavesIsolatedPointsAndEmptyDetailAlone() {
         // 動かない点（線ではない）と、細部の無い所はそのまま
         let grid = BrightStacker.Grid(.bayer(width: 64, height: 64))
