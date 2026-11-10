@@ -55,8 +55,11 @@ if [ -f "$ICNS_SRC" ]; then
 fi
 
 # 5. 依存ライブラリは静的リンクのため、システム外のdylibを参照していないこと・全アーキテクチャを含むことを確認
-EXTERNAL_DYLIBS="$(otool -L "$CONTENTS/MacOS/$APP_NAME" | tail -n +2 | awk '{print $1}' \
-    | grep -vE '^(/System/|/usr/lib/)' || true)"
+# Universal の実行ファイルに otool -L をそのまま使うと、アーキテクチャごとの見出し行（"…(architecture arm64):"）が
+# 参照先に混ざる（Xcode 16 以降の otool）。アーキテクチャごとに調べ、見出しの1行目を除く
+EXTERNAL_DYLIBS="$(for ARCH in "${ARCHS[@]}"; do
+        otool -arch "$ARCH" -L "$CONTENTS/MacOS/$APP_NAME" | tail -n +2 | awk '{print $1}'
+    done | sort -u | grep -vE '^(/System/|/usr/lib/)' || true)"
 if [ -n "$EXTERNAL_DYLIBS" ]; then
     echo "ERROR: System-external libraries are referenced:" >&2
     echo "$EXTERNAL_DYLIBS" >&2
