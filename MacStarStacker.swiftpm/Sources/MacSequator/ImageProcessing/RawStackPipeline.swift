@@ -218,7 +218,8 @@ enum RawStackPipeline {
         let total = input.lights.count
         let bayerWeights = brightWeights(info, colors: info.cfaPattern)
         let skyStacker = StreamingStacker(mode: input.mode, count: pixelCount, clipping: input.averageClipping,
-                                          grouping: .bayerBlocks(width: info.width, height: info.height, weights: bayerWeights),
+                                          grouping: .bayerBlocks(width: info.width, height: info.height, weights: bayerWeights,
+                                                                       colors: info.cfaPattern.map { $0 == 3 ? 1 : min(2, Int($0)) }),
                                           brightOptions: brightOptions(weights: bayerWeights, blacks: info.blackLevels.map(Float.init)))
         // 地上側は固定構図のままノイズを減らす（比較明の場合は平均）
         let groundMode: Mode = input.mode == .median ? .median : .average
@@ -963,8 +964,8 @@ final class StreamingStacker {
         /// 値ごとに最大値を取る
         case samples
         /// ベイヤー配列の2x2ブロック（R・G・G・B）を単位にする（BrightStacker）。
-        /// weights は2x2の (0,0) (0,1) (1,0) (1,1) の位置の重み。
-        case bayerBlocks(width: Int, height: Int, weights: [Float])
+        /// weights は2x2の (0,0) (0,1) (1,0) (1,1) の位置の重み、colors はその位置の色（0=R, 1=G, 2=B。省略すると RGGB）。
+        case bayerBlocks(width: Int, height: Int, weights: [Float], colors: [Int]? = nil)
         /// RGBを並べた画素を単位にする（BrightStacker）
         case rgbPixels(width: Int, height: Int, weights: [Float])
     }
@@ -987,9 +988,10 @@ final class StreamingStacker {
         self.count = count
         self.clipping = mode == .average ? clipping : nil
         switch (mode, grouping) {
-        case (.compareBright, .bayerBlocks(let width, let height, let weights)):
+        case (.compareBright, .bayerBlocks(let width, let height, let weights, let colors)):
             precondition(width * height == count && weights.count == 4, "ベイヤー配列の寸法が一致しません")
-            bright = BrightStacker(layout: .bayer(width: width, height: height), weights: weights, options: brightOptions)
+            bright = BrightStacker(layout: .bayer(width: width, height: height), weights: weights, colors: colors,
+                                   options: brightOptions)
         case (.compareBright, .rgbPixels(let width, let height, let weights)):
             precondition(width * height * 3 == count && weights.count == 3, "RGBの画素数が一致しません")
             bright = BrightStacker(layout: .rgb(width: width, height: height), weights: weights, options: brightOptions)

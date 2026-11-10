@@ -16,6 +16,8 @@ import Foundation
 /// 2. 細部: フレームごとに、まわりより細く明るい部分（白トップハット）のうち1枚のノイズより十分明るい所を取り出し、
 ///    その値ごとの最大値を 1 に重ねる。光跡は値ごとにつながり、雲と空の色の差のように広がった差は重ねない。
 ///    フレームごとにそのフレームの背景からの明るさで比べるため、雲の上を通った星も星の色のまま重なる。
+/// 3. 細部の偽色: 星の像は画素1〜2個分と小さく、どの色の画素に乗るかで色が決まるため、光跡の色が周期的に入れ替わる。
+///    細部だけ、光跡に沿って色を平均し直す（TrailColorCorrector）。
 final class BrightStacker {
     struct Options {
         /// 明るさを比べる前に平均する範囲の半径（画素）
@@ -34,6 +36,8 @@ final class BrightStacker {
         /// 細部を重ね始める差・すべて重ねる差（1枚あたりのノイズの標準偏差の倍数）
         var detailLower: Float = 4
         var detailUpper: Float = 7
+        /// 細部（光跡）の偽色を抑える設定
+        var trailColor = TrailColorCorrector.Options()
     }
 
     enum Layout {
@@ -81,6 +85,8 @@ final class BrightStacker {
 
     let grid: Grid
     private let weights: [Float]
+    /// ブロックの中の位置（plane）ごとの色（0=R, 1=G, 2=B）
+    private let colors: [Int]
     private let options: Options
     /// 単位ごとの、これまでで最も明るい（平均した）明るさ
     private var bestScore: [Float] = []
@@ -101,10 +107,13 @@ final class BrightStacker {
     private(set) var noise: FrameNoiseModel?
     private var added = 0
 
-    init(layout: Layout, weights: [Float], options: Options = Options()) {
+    /// colors はベイヤー配列の2x2の位置ごとの色（0=R, 1=G, 2=B）。省略すると RGGB。RGBでは使わない
+    init(layout: Layout, weights: [Float], colors: [Int]? = nil, options: Options = Options()) {
         grid = Grid(layout)
         precondition(weights.count == grid.planes, "重みの数が一致しません")
         self.weights = weights
+        self.colors = grid.isBayer ? (colors ?? [0, 1, 1, 2]) : [0, 1, 2]
+        precondition(self.colors.count == grid.planes, "色の数が一致しません")
         self.options = options
         var edges: [Int] = []
         if grid.isBayer {
@@ -164,24 +173,46 @@ final class BrightStacker {
             }
         }
         // 2. 細部: 背景にすでに含まれている細部（混ぜた分）より明るい分だけを重ねる
-        if noise != nil {
+        if let noise {
             let radius = g.unitRadius(options.detailRadius)
+            var detail = [Float](repeating: 0, count: count)
+            // 背景に混ざっている細部のうち、細部と合わせて偽色を直す分（光跡のように動くものが大半の所だけ）
+            var moved = [Float](repeating: 0, count: count)
+            let correcting = options.trailColor.enabled
             for plane in 0..<g.planes {
                 let values = extract(plane: plane, from: background)
                 let opened = Self.opening(values, g.unitsWide, g.unitsHigh, radius)
-                background.withUnsafeMutableBufferPointer { output in
-                    detailMaximum.withUnsafeBufferPointer { details in
-                        DispatchQueue.concurrentPerform(iterations: g.unitsHigh) { uy in
-                            for ux in 0..<g.unitsWide {
-                                let u = uy * g.unitsWide + ux
-                                let i = g.index(ux, uy, plane)
-                                let extra = details[i] - (values[u] - opened[u])
-                                if extra > 0 { output[i] += extra }
+                detail.withUnsafeMutableBufferPointer { output in
+                    moved.withUnsafeMutableBufferPointer { movedOutput in
+                        detailMaximum.withUnsafeBufferPointer { details in
+                            DispatchQueue.concurrentPerform(iterations: g.unitsHigh) { uy in
+                                for ux in 0..<g.unitsWide {
+                                    let u = uy * g.unitsWide + ux
+                                    let i = g.index(ux, uy, plane)
+                                    let included = values[u] - opened[u]
+                                    let extra = details[i] - included
+                                    guard extra > 0 else { continue }
+                                    output[i] = extra
+                                    // 光跡は混ぜたフレームの分（1割ほど）しか背景に無いが、動かない街明かりなどは細部のほぼすべてが
+                                    // 背景にある。細部の大半が背景に無い（動くものの）所だけ、背景の分も細部に移して色を直す
+                                    guard correcting, included > 0 else { continue }
+                                    let fraction = extra / details[i]
+                                    let share = min(1, max(0, (fraction - 0.5) / 0.3))
+                                    movedOutput[i] = included * share
+                                    output[i] += movedOutput[i]
+                                }
                             }
                         }
                     }
                 }
             }
+            // 3. 細部の偽色を抑える（光跡に沿って色を平均し直す）
+            if options.trailColor.enabled {
+                let whiteBalance = weights.map { $0 > 0 ? 1 / $0 : 1 }
+                TrailColorCorrector.correct(&detail, grid: g, colors: colors, whiteBalance: whiteBalance,
+                                            threshold: trailThreshold(background, noise: noise), options: options.trailColor)
+            }
+            for i in 0..<count { background[i] += detail[i] - moved[i] }
         }
         // 2x2に収まらない奇数の端の列・行は値ごとの最大値
         for (k, i) in edgeIndices.enumerated() { background[i] = Float(edgeMaximum[k]) }
@@ -189,6 +220,20 @@ final class BrightStacker {
     }
 
     // MARK: - 細部
+
+    /// 偽色を直す光跡の明るさの下限（ホワイトバランス後）。背景の明るさでの G の1枚あたりのノイズの半分
+    private func trailThreshold(_ background: [Float], noise: FrameNoiseModel) -> Float {
+        let g = grid
+        guard let plane = colors.firstIndex(of: 1) else { return 0 }
+        let values = extract(plane: plane, from: background)
+        let step = max(1, values.count / 50_000)
+        let samples = stride(from: 0, to: values.count, by: step).map { values[$0] }.sorted()
+        guard !samples.isEmpty, g.unitCount > 0 else { return 0 }
+        let sigma = noise.sigma(plane: plane, level: samples[samples.count / 2])
+        guard sigma.isFinite, sigma < .greatestFiniteMagnitude else { return 0 }
+        let whiteBalance = weights[plane] > 0 ? 1 / weights[plane] : 1
+        return 0.5 * sigma * whiteBalance
+    }
 
     /// フレームの細部（白トップハットのうちノイズより十分明るい所）で、細部の値ごとの最大値を更新する。
     /// 明るさはオープニングからの差（広がった明るさを含まない）で測るが、ノイズより明るいかは
